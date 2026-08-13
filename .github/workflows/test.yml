@@ -148,8 +148,10 @@ jobs:
 
       - name: Composer audit
         # Per-CVE documented ignores live in composer.json (config.audit.ignore) —
-        # never blanket-suppressed here.
-        run: composer audit --locked
+        # never blanket-suppressed here. --ignore-unreachable: a Packagist
+        # advisory-API outage (502s happen) must not fail CI; real advisories
+        # still do.
+        run: composer audit --locked --ignore-unreachable
 
       - name: Changelog grammar
         run: pnpm exec arts-wp changelog validate --latest
