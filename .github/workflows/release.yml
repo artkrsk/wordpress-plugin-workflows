@@ -345,6 +345,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+    env:
+      CHANGELOG: ''
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -551,6 +553,8 @@ jobs:
     environment:
       name: wordpress-org
       url: https://wordpress.org/plugins/${{ needs.detect.outputs.plugin_slug }}/
+    env:
+      TAG_NAME: ''
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

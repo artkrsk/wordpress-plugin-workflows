@@ -39,6 +39,7 @@ permissions:
 
 env:
   NODE_OPTIONS: '--dns-result-order=ipv4first --no-network-family-autoselection'
+  SLUG: ''
 
 jobs:
   plugin-check-trunk:
