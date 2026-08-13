@@ -51,6 +51,37 @@ on:
         required: false
         type: string
         default: ''
+      integration_command:
+        description: >
+          Replaces the built-in per-suite PHPUnit loop. For repos whose suites
+          don't run as `--env-cwd=test-workspace -- vendor/bin/phpunit` — e.g.
+          fluid-design-system, whose integration tier uses an isolated PHPUnit
+          install to keep two Composer autoloaders from colliding.
+        required: false
+        type: string
+        default: ''
+      integration_setup_command:
+        description: >
+          Runs inside wp-env's lifetime, after start and before any suite.
+          For preparing test-only tooling that has to exist in the container.
+        required: false
+        type: string
+        default: ''
+      run_e2e:
+        description: Run a Playwright suite against the same wp-env instance
+        required: false
+        type: boolean
+        default: false
+      e2e_command:
+        description: The Playwright invocation
+        required: false
+        type: string
+        default: pnpm exec playwright test --project=chromium
+      playwright_browsers:
+        description: Space-separated browsers to install (e.g. "chromium firefox webkit")
+        required: false
+        type: string
+        default: chromium
       extra_plugin_check_ignore_codes:
         description: Extra plugin-check codes to ignore (newline-separated), appended to the shared set
         required: false
@@ -246,7 +277,11 @@ jobs:
 
   integration:
     name: Integration Tests
-    if: inputs.integration_suites != '[]'
+    # Any of the three can carry the job: the suite loop, a repo-specific
+    # command that replaces it, or an e2e run. They share one wp-env on
+    # purpose — the runner host is the scarce resource, and starting it twice
+    # would double the slowest job in the pipeline.
+    if: inputs.integration_suites != '[]' || inputs.integration_command != '' || inputs.run_e2e
     runs-on: ${{ inputs.runner }}
     # First run on a fresh runner downloads WP + plugin zips, builds arm64
     # images, and sparse-clones the core PHPUnit suite.
@@ -296,10 +331,23 @@ jobs:
       - name: Build plugin
         run: pnpm build
 
+      - name: Install Playwright browsers
+        if: inputs.run_e2e
+        run: pnpm exec playwright install ${{ inputs.playwright_browsers }}
+
+      - name: Install Playwright system dependencies
+        if: inputs.run_e2e && runner.environment == 'github-hosted'
+        run: pnpm exec playwright install-deps ${{ inputs.playwright_browsers }}
+
       - name: Start wp-env
         run: pnpm exec wp-env start
 
+      - name: Integration setup
+        if: inputs.integration_setup_command != ''
+        run: ${{ inputs.integration_setup_command }}
+
       - name: PHPUnit suites
+        if: inputs.integration_suites != '[]' && inputs.integration_command == ''
         run: |
           echo '${{ inputs.integration_suites }}' | node -e '
             const suites = JSON.parse(require("fs").readFileSync(0, "utf8"))
@@ -314,9 +362,39 @@ jobs:
             }
           '
 
+      - name: PHPUnit suites (repo command)
+        if: inputs.integration_command != ''
+        run: ${{ inputs.integration_command }}
+
+      - name: E2E suite
+        if: inputs.run_e2e
+        run: ${{ inputs.e2e_command }}
+
+      - name: Dump environment diagnostics
+        if: failure()
+        run: |
+          docker ps -a || true
+          pnpm exec wp-env run cli -- tail -n 100 /var/www/html/wp-content/debug.log || true
+
       - name: Destroy wp-env
         if: always()
         run: timeout --kill-after=30 180 pnpm exec wp-env destroy --force 2>/dev/null || true
+
+      - name: Upload Playwright report
+        if: always() && inputs.run_e2e
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
+
+      - name: Upload Playwright traces and video
+        if: failure() && inputs.run_e2e
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-results
+          path: test-results/
+          retention-days: 7
 
       - name: Release cross-repo wp-env lock
         if: always()
