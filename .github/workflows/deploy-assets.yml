@@ -27,6 +27,11 @@ on:
         required: false
         type: boolean
         default: false
+      blueprint_check_command:
+        description: Command for the blueprint check (see test.yml's input of the same name)
+        required: false
+        type: string
+        default: pnpm exec arts-wp blueprint check
     secrets:
       SVN_USERNAME:
         required: true
@@ -63,7 +68,7 @@ jobs:
       # otherwise ship silently.
       - name: Blueprint is valid and regenerated
         if: inputs.blueprint_check
-        run: pnpm exec arts-wp blueprint check
+        run: ${{ inputs.blueprint_check_command }}
 
       - name: Setup SVN
         run: which svn || (sudo apt-get update && sudo apt-get install -y subversion)

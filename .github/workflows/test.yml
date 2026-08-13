@@ -30,6 +30,14 @@ on:
         required: false
         type: boolean
         default: false
+      blueprint_check_command:
+        description: >
+          Command for the blueprint check. Repos on the shared arts-wp blueprint
+          module keep the default; repos with custom blueprint builders
+          (repeater-tags) pass their own scripts + staleness assert.
+        required: false
+        type: string
+        default: pnpm exec arts-wp blueprint check
       integration_suites:
         description: >
           JSON array of PHPUnit config files to run inside wp-env against the
@@ -158,8 +166,7 @@ jobs:
 
       - name: Blueprint is valid and regenerated
         if: inputs.blueprint_check
-        run: |
-          pnpm exec arts-wp blueprint check
+        run: ${{ inputs.blueprint_check_command }}
 
   plugin-check:
     name: WordPress.org Plugin Check
