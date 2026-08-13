@@ -1,0 +1,122 @@
+name: Deploy Assets to WordPress.org
+
+# Listing assets (banners, icons, screenshots, the Playground blueprint) live in
+# SVN assets/, outside the plugin ZIP — changing one has nothing to do with a
+# plugin version. release.yml only fires on a v* tag, which would otherwise
+# force a fake version bump to publish a new screenshot. This deploys
+# .wordpress-org/ on its own.
+#
+# Touches assets/ ONLY. trunk/ and tags/ stay at depth-empty in the working
+# copy and are never a commit target. release.yml keeps syncing the same
+# directory on real releases, so the two paths agree.
+
+on:
+  workflow_call:
+    inputs:
+      plugin_slug:
+        description: The frozen wp.org slug
+        required: true
+        type: string
+      dry_run:
+        description: Print the changes without committing
+        required: false
+        type: boolean
+        default: false
+      blueprint_check:
+        description: Assert the generated blueprint is current before shipping it
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      SVN_USERNAME:
+        required: true
+      SVN_PASSWORD:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-assets:
+    name: Sync .wordpress-org to SVN assets
+    runs-on: ubuntu-latest
+    environment:
+      name: wordpress-org
+      url: https://wordpress.org/plugins/${{ inputs.plugin_slug }}/
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        run: corepack enable
+
+      - name: Install Node dependencies
+        if: inputs.blueprint_check
+        run: pnpm install --frozen-lockfile
+
+      # The blueprint is generated, so a hand-edit or a forgotten rebuild would
+      # otherwise ship silently.
+      - name: Blueprint is valid and regenerated
+        if: inputs.blueprint_check
+        run: pnpm exec arts-wp blueprint check
+
+      - name: Setup SVN
+        run: which svn || (sudo apt-get update && sudo apt-get install -y subversion)
+
+      - name: Checkout SVN (assets only)
+        run: |
+          # --depth immediates gets the bare trunk/tags/assets entries without
+          # their contents, then only assets is filled in. Avoids pulling every
+          # tagged release.
+          svn checkout --non-interactive --trust-server-cert --depth immediates \
+            --username="${{ secrets.SVN_USERNAME }}" \
+            --password="${{ secrets.SVN_PASSWORD }}" \
+            "https://plugins.svn.wordpress.org/${{ inputs.plugin_slug }}/" /tmp/svn
+
+          svn update --non-interactive --trust-server-cert --set-depth infinity \
+            --username="${{ secrets.SVN_USERNAME }}" \
+            --password="${{ secrets.SVN_PASSWORD }}" \
+            /tmp/svn/assets
+
+      - name: Mirror .wordpress-org into assets
+        run: |
+          # --delete so a file dropped from the repo also leaves the listing.
+          # Dotfiles are never copied (.DS_Store); svn 1.7+ keeps its only .svn
+          # at the working-copy root, so assets/ holds no metadata to clobber.
+          rsync -a --delete --exclude='.*' .wordpress-org/ /tmp/svn/assets/
+
+      - name: Stage and show the diff
+        run: |
+          cd /tmp/svn
+          svn add --force assets --auto-props --parents --depth infinity -q 2>/dev/null || true
+          svn status assets | grep '^!' | sed 's/! *//' | xargs -r -I% svn rm %@ 2>/dev/null || true
+
+          echo "── pending changes ─────────────────────────────"
+          svn status assets
+          echo "────────────────────────────────────────────────"
+
+      - name: Commit to WordPress.org
+        if: ${{ !inputs.dry_run }}
+        run: |
+          cd /tmp/svn
+
+          if [ -z "$(svn status assets)" ]; then
+            echo "Nothing to deploy — assets already match."
+            exit 0
+          fi
+
+          svn commit assets --non-interactive --trust-server-cert \
+            --username="${{ secrets.SVN_USERNAME }}" \
+            --password="${{ secrets.SVN_PASSWORD }}" \
+            -m "Update listing assets (${GITHUB_SHA:0:7})"
+
+          echo "Deployed. The listing and ps.w.org CDN may lag a few minutes."
+
+      - name: Dry run summary
+        if: inputs.dry_run
+        run: echo "Dry run — nothing was committed."

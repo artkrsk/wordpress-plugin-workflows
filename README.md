@@ -1,17 +1,22 @@
-# WordPress Plugin Release Action
+# WordPress Plugin Workflows
 
-A robust, universal GitHub Actions workflow for automating WordPress plugin releases to GitHub and WordPress.org.
+Reusable GitHub Actions workflows for Arts WordPress plugins — the shared CI/CD source of truth. Renamed from `wordpress-plugin-release-action` (GitHub redirects old `uses:` pins).
 
-## Features
+| Workflow | What |
+|---|---|
+| `test.yml` | CI: quality (Biome, stylelint, tsc, Vitest+Codecov, PHPStan, PHPCS, knip, fallow-advisory, composer audit, changelog grammar, blueprint staleness), plugin-check (zip budget + wp.org Plugin Check), integration (wp-env PHPUnit against the built dist/) |
+| `release.yml` | Tag-triggered release: version consistency, changelog validation (`use_arts_changelog`), GitHub Release, wp.org SVN deploy with a duplicate-tag guard (`allow_retag`) |
+| `deploy-assets.yml` | wp.org listing assets (banners/icons/screenshots/blueprint) to SVN `assets/`, decoupled from releases; `dry_run` input |
+| `deploy-docs.yml` | VitePress docs → GitHub Pages (triggers stay in the caller) |
+| `canary.yml` | Weekly early warning: Plugin Check vs WP trunk + PHP min/max × Elementor-beta integration matrix |
 
-- ✅ **Smart Auto-Detection** - Automatically detects plugin slug, main file, and version
-- ✅ **Flexible Configuration** - Override any default with custom inputs
-- ✅ **Version Validation** - Ensures consistency across plugin header, readme.txt, and package.json
-- ✅ **GitHub Releases** - Creates releases with auto-generated changelogs
-- ✅ **WordPress.org Deployment** - Automated SVN deployment to WordPress.org repository
-- ✅ **Asset Management** - Handles plugin assets (banners, icons, screenshots)
-- ✅ **Build System Support** - Works with npm, composer-only, or custom build systems
-- ✅ **ZIP Validation** - Verifies plugin structure and dependencies
+Plus `actions/wp-env-lock` (the cross-repo Docker/wp-env host lock for the shared self-hosted runner) and `scripts/provision-runner.sh` (register a new repo's Pi runner — part of new-plugin bootstrap).
+
+Caller examples live in `examples/`. Repos built from `artkrsk/wp-plugin-template` come pre-wired.
+
+---
+
+# Release workflow reference
 
 ## Quick Start
 

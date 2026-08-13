@@ -1,0 +1,72 @@
+name: Deploy Docs
+
+# Reusable VitePress → GitHub Pages deploy. Triggers stay in the caller —
+# trigger paths are per-repo (a docs site that imports the engine directly
+# must also rebuild on src/ts/** changes).
+#
+# Caller needs: permissions contents:read, pages:write, id-token:write
+# and concurrency group "pages" (cancel-in-progress: false).
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Runner label for the build job
+        required: false
+        type: string
+        default: ubuntu-latest
+      docs_base_path:
+        description: Base path for the docs build (usually /<repo-name>/)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build docs
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        if: runner.environment == 'github-hosted'
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        if: runner.environment == 'github-hosted'
+        run: corepack enable
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build VitePress site
+        run: pnpm exec vitepress build docs
+        env:
+          DOCS_BASE_PATH: ${{ inputs.docs_base_path }}
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs/.vitepress/dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

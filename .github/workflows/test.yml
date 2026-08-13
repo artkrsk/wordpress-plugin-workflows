@@ -1,0 +1,316 @@
+name: Plugin Tests
+
+# Reusable CI for Arts WordPress plugins (pnpm + @arts/wp-plugin-tooling repos).
+# Callers provide triggers + concurrency and pass the per-repo knobs as inputs.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Runner label for the heavy jobs
+        required: false
+        type: string
+        default: self-hosted
+      zip_budget_mb:
+        description: Hard ceiling for the release zip, in MB (e.g. "0.25")
+        required: true
+        type: string
+      run_js_tests:
+        description: Run the Vitest suite in the quality job
+        required: false
+        type: boolean
+        default: true
+      coverage:
+        description: Upload Vitest coverage to Codecov (informational only, never a gate)
+        required: false
+        type: boolean
+        default: false
+      blueprint_check:
+        description: Assert the wp.org Live Preview blueprint is regenerated and committed
+        required: false
+        type: boolean
+        default: false
+      integration_suites:
+        description: >
+          JSON array of PHPUnit config files to run inside wp-env against the
+          built dist/ artifact ("" entry = default phpunit.xml.dist).
+          Empty array = no integration job.
+        required: false
+        type: string
+        default: '[]'
+      wp_env_ports:
+        description: The repo's committed wp-env ports, comma-separated (e.g. "8890,8891")
+        required: false
+        type: string
+        default: ''
+      extra_plugin_check_ignore_codes:
+        description: Extra plugin-check codes to ignore (newline-separated), appended to the shared set
+        required: false
+        type: string
+        default: ''
+    secrets:
+      CODECOV_TOKEN:
+        description: Codecov upload token (only needed when coverage input is true)
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  NODE_OPTIONS: '--dns-result-order=ipv4first --no-network-family-autoselection'
+
+jobs:
+  quality:
+    name: Code Quality
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Disable git hooks
+        run: git config --global core.hooksPath /dev/null
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        if: runner.environment == 'github-hosted'
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        if: runner.environment == 'github-hosted'
+        run: corepack enable
+
+      - name: Setup PHP
+        if: runner.environment == 'github-hosted'
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Composer dependencies (runs Strauss via post-install hook)
+        run: composer install --prefer-dist --no-progress
+
+      - name: Biome
+        run: pnpm exec biome ci .
+
+      - name: Stylelint
+        run: |
+          if [ -d src/styles ]; then
+            pnpm exec stylelint 'src/styles/**/*.scss'
+          else
+            echo "No src/styles — skipped"
+          fi
+
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
+
+      - name: Vitest
+        if: inputs.run_js_tests && !inputs.coverage
+        run: pnpm exec vitest run
+
+      - name: Vitest + coverage
+        if: inputs.run_js_tests && inputs.coverage
+        run: pnpm exec vitest run --coverage
+
+      - name: Upload coverage to Codecov
+        if: inputs.run_js_tests && inputs.coverage
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/coverage-final.json
+          fail_ci_if_error: false
+
+      - name: PHPStan
+        run: |
+          if [ -f phpstan.neon ]; then
+            vendor/bin/phpstan analyse --memory-limit=1G --no-progress
+          else
+            echo "No phpstan.neon — skipped"
+          fi
+
+      - name: PHPCS
+        run: |
+          if [ -f phpcs.xml ]; then
+            vendor/bin/phpcs
+          else
+            echo "No phpcs.xml — skipped"
+          fi
+
+      - name: Knip
+        run: pnpm exec knip
+
+      - name: Fallow (advisory)
+        continue-on-error: true
+        run: pnpm exec fallow
+
+      - name: Composer audit
+        # Per-CVE documented ignores live in composer.json (config.audit.ignore) —
+        # never blanket-suppressed here.
+        run: composer audit --locked
+
+      - name: Changelog grammar
+        run: pnpm exec arts-wp changelog validate --latest
+
+      - name: Blueprint is valid and regenerated
+        if: inputs.blueprint_check
+        run: |
+          pnpm exec arts-wp blueprint check
+
+  plugin-check:
+    name: WordPress.org Plugin Check
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Disable git hooks
+        run: git config --global core.hooksPath /dev/null
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        if: runner.environment == 'github-hosted'
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        if: runner.environment == 'github-hosted'
+        run: corepack enable
+
+      - name: Setup PHP
+        if: runner.environment == 'github-hosted'
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Composer dependencies (runs Strauss via post-install hook)
+        run: composer install --prefer-dist --no-progress
+
+      - name: Build plugin
+        run: pnpm build
+
+      - name: Validate ZIP size
+        run: |
+          SLUG=$(node -e "import('./project.config.js').then(m => console.log(m.default.slug))")
+          ZIP_FILE="dist/${SLUG}.zip"
+          SIZE_BYTES=$(stat -f%z "$ZIP_FILE" 2>/dev/null || stat -c%s "$ZIP_FILE")
+          SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
+
+          if (( $(echo "$SIZE_MB > ${{ inputs.zip_budget_mb }}" | bc -l) )); then
+            echo "ZIP too large: ${SIZE_MB} MB (max ${{ inputs.zip_budget_mb }} MB)"
+            exit 1
+          fi
+
+          echo "ZIP size: ${SIZE_MB} MB"
+          echo "SLUG=$SLUG" >> "$GITHUB_ENV"
+
+      - name: Acquire cross-repo wp-env lock
+        uses: artkrsk/wordpress-plugin-workflows/actions/wp-env-lock@main
+        with:
+          mode: acquire
+          # plugin-check-action always binds 8880/8881
+          ports: '8880,8881'
+          project: ${{ env.SLUG }}
+
+      - name: Run WordPress Plugin Check
+        uses: wordpress/plugin-check-action@v1
+        with:
+          build-dir: ./dist/${{ env.SLUG }}
+          wp-version: 'latest'
+          # The plugins' prefixes are deliberate and consistent but don't derive
+          # from the slug, which is all this sniff accepts.
+          ignore-codes: |
+            WordPress.NamingConventions.PrefixAllGlobals.InvalidPrefixPassed
+            ${{ inputs.extra_plugin_check_ignore_codes }}
+
+      - name: Release cross-repo wp-env lock
+        if: always()
+        uses: artkrsk/wordpress-plugin-workflows/actions/wp-env-lock@main
+        with:
+          mode: release
+
+  integration:
+    name: Integration Tests
+    if: inputs.integration_suites != '[]'
+    runs-on: ${{ inputs.runner }}
+    # First run on a fresh runner downloads WP + plugin zips, builds arm64
+    # images, and sparse-clones the core PHPUnit suite.
+    timeout-minutes: 30
+    steps:
+      - name: Disable git hooks
+        run: git config --global core.hooksPath /dev/null
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        if: runner.environment == 'github-hosted'
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        if: runner.environment == 'github-hosted'
+        run: corepack enable
+
+      - name: Setup PHP
+        if: runner.environment == 'github-hosted'
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer
+
+      - name: Install Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Composer dependencies (runs Strauss via post-install hook)
+        run: composer install --prefer-dist --no-progress
+
+      - name: Resolve slug
+        run: |
+          SLUG=$(node -e "import('./project.config.js').then(m => console.log(m.default.slug))")
+          echo "SLUG=$SLUG" >> "$GITHUB_ENV"
+
+      - name: Acquire cross-repo wp-env lock
+        uses: artkrsk/wordpress-plugin-workflows/actions/wp-env-lock@main
+        with:
+          mode: acquire
+          ports: ${{ inputs.wp_env_ports }}
+          project: ${{ env.SLUG }}
+
+      - name: Build plugin
+        run: pnpm build
+
+      - name: Start wp-env
+        run: pnpm exec wp-env start
+
+      - name: PHPUnit suites
+        run: |
+          echo '${{ inputs.integration_suites }}' | node -e '
+            const suites = JSON.parse(require("fs").readFileSync(0, "utf8"))
+            const { execSync } = require("child_process")
+            for (const cfg of suites) {
+              const flag = cfg ? ` -c ${cfg}` : ""
+              console.log(`\n=== PHPUnit${flag || " (default)"} ===`)
+              execSync(
+                `pnpm exec wp-env run tests-cli --env-cwd=test-workspace -- vendor/bin/phpunit${flag}`,
+                { stdio: "inherit" }
+              )
+            }
+          '
+
+      - name: Destroy wp-env
+        if: always()
+        run: timeout --kill-after=30 180 pnpm exec wp-env destroy --force 2>/dev/null || true
+
+      - name: Release cross-repo wp-env lock
+        if: always()
+        uses: artkrsk/wordpress-plugin-workflows/actions/wp-env-lock@main
+        with:
+          mode: release

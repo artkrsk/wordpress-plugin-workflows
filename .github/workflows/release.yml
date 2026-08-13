@@ -88,6 +88,17 @@ on:
         type: boolean
         default: false
 
+      use_arts_changelog:
+        description: "Validate the readme.txt changelog grammar for the tagged version and use the entry as the release body (@arts/wp-plugin-tooling repos). Hard-fails BEFORE any SVN contact."
+        required: false
+        type: boolean
+        default: false
+      allow_retag:
+        description: "Allow overwriting an existing SVN tag (a re-run otherwise silently rewrites SVN history)"
+        required: false
+        type: boolean
+        default: false
+
       # Version validation
       skip_version_validation:
         description: "Skip version consistency checks"
@@ -456,10 +467,24 @@ jobs:
             echo "This may be expected if the plugin doesn't use Composer"
           fi
 
+      - name: Validate changelog entry (arts-wp)
+        if: ${{ inputs.use_arts_changelog }}
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          # The grammar gate: entry must exist, be non-empty, and every bullet
+          # must carry a valid lowercase prefix (added/improved/fixed/security).
+          # Failing here means nothing has touched GitHub Releases or SVN yet.
+          pnpm exec arts-wp changelog validate --version "$TAG_VERSION"
+
       - name: Generate changelog
         id: changelog
         run: |
-          if [ -n "${{ inputs.custom_changelog }}" ]; then
+          if [ "${{ inputs.use_arts_changelog }}" = "true" ]; then
+            TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+            echo "CHANGELOG<<EOF" >> $GITHUB_ENV
+            pnpm exec arts-wp changelog extract --version "$TAG_VERSION" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+          elif [ -n "${{ inputs.custom_changelog }}" ]; then
             # Use custom changelog if provided
             echo "CHANGELOG<<EOF" >> $GITHUB_ENV
             echo "${{ inputs.custom_changelog }}" >> $GITHUB_ENV
@@ -544,6 +569,20 @@ jobs:
           TAG_NAME="${GITHUB_REF#refs/tags/v}"
           echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
           echo "Tag name for WordPress deployment: $TAG_NAME"
+
+      - name: Setup SVN (early, for the tag guard)
+        run: |
+          which svn || sudo apt-get update && sudo apt-get install -y subversion
+
+      - name: Guard against overwriting an existing SVN tag
+        if: ${{ !inputs.allow_retag }}
+        run: |
+          SVN_URL="${{ needs.detect.outputs.svn_url }}"
+          if svn ls --non-interactive --trust-server-cert "${SVN_URL}tags/${{ env.TAG_NAME }}/" >/dev/null 2>&1; then
+            echo "::error::SVN tag ${{ env.TAG_NAME }} already exists — a re-run would silently rewrite wp.org history. Pass allow_retag: true only if that is exactly what you want."
+            exit 1
+          fi
+          echo "SVN tag ${{ env.TAG_NAME }} is new — safe to deploy."
 
       - name: Extract plugin
         run: |

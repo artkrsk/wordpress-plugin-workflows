@@ -1,0 +1,224 @@
+name: Weekly Canary
+
+# Early-warning matrix, run on a weekly cron from the caller: the wp.org
+# Plugin Check against WordPress trunk, plus (where the repo has PHPUnit
+# suites) integration runs against PHP min/max and the Elementor beta when
+# one is ahead of stable. Catches "next WP/Elementor breaks us" before users do.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: Runner label
+        required: false
+        type: string
+        default: self-hosted
+      integration_suites:
+        description: JSON array of PHPUnit configs ("" = default). Empty array = plugin-check canary only.
+        required: false
+        type: string
+        default: '[]'
+      wp_env_ports:
+        description: The repo's committed wp-env ports, comma-separated
+        required: false
+        type: string
+        default: ''
+      php_matrix:
+        description: JSON array of PHP versions for the integration canary
+        required: false
+        type: string
+        default: '["8.0", "8.4"]'
+      elementor_beta:
+        description: Also run against the Elementor beta when one is ahead of stable
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_OPTIONS: '--dns-result-order=ipv4first --no-network-family-autoselection'
+
+jobs:
+  plugin-check-trunk:
+    name: Plugin Check vs WP trunk
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Disable git hooks
+        run: git config --global core.hooksPath /dev/null
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        if: runner.environment == 'github-hosted'
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        if: runner.environment == 'github-hosted'
+        run: corepack enable
+
+      - name: Setup PHP
+        if: runner.environment == 'github-hosted'
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer
+
+      - name: Install dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          composer install --prefer-dist --no-progress
+
+      - name: Build plugin
+        run: pnpm build
+
+      - name: Resolve slug
+        run: |
+          SLUG=$(node -e "import('./project.config.js').then(m => console.log(m.default.slug))")
+          echo "SLUG=$SLUG" >> "$GITHUB_ENV"
+
+      - name: Acquire cross-repo wp-env lock
+        uses: artkrsk/wordpress-plugin-workflows/actions/wp-env-lock@main
+        with:
+          mode: acquire
+          ports: '8880,8881'
+          project: ${{ env.SLUG }}
+
+      - name: Plugin Check against WordPress trunk
+        uses: wordpress/plugin-check-action@v1
+        with:
+          build-dir: ./dist/${{ env.SLUG }}
+          wp-version: 'trunk'
+          ignore-codes: |
+            WordPress.NamingConventions.PrefixAllGlobals.InvalidPrefixPassed
+
+      - name: Release cross-repo wp-env lock
+        if: always()
+        uses: artkrsk/wordpress-plugin-workflows/actions/wp-env-lock@main
+        with:
+          mode: release
+
+  integration-matrix:
+    name: Integration (PHP ${{ matrix.php }})
+    if: inputs.integration_suites != '[]'
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    strategy:
+      # One shared host: never parallel, never abort the sibling on failure —
+      # each PHP version is an independent signal.
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        php: ${{ fromJSON(inputs.php_matrix) }}
+    steps:
+      - name: Disable git hooks
+        run: git config --global core.hooksPath /dev/null
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        if: runner.environment == 'github-hosted'
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        if: runner.environment == 'github-hosted'
+        run: corepack enable
+
+      - name: Setup PHP
+        if: runner.environment == 'github-hosted'
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer
+
+      - name: Install dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          composer install --prefer-dist --no-progress
+
+      - name: Detect Elementor beta
+        id: detect
+        run: |
+          BETA=""
+          if [ "${{ inputs.elementor_beta }}" = "true" ]; then
+            README=$(curl -s https://plugins.svn.wordpress.org/elementor/trunk/readme.txt)
+            STABLE=$(echo "$README" | grep -im1 '^Stable tag:' | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r')
+            BETA_TAG=$(echo "$README" | grep -im1 '^Beta tag:' | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r')
+            if [ -n "$BETA_TAG" ] && php -r "exit(version_compare('$BETA_TAG', '$STABLE', '>') ? 0 : 1);"; then
+              BETA="$BETA_TAG"
+              echo "Elementor beta ahead of stable: $BETA (stable $STABLE)"
+            fi
+          fi
+          echo "beta=$BETA" >> "$GITHUB_OUTPUT"
+
+      - name: Write wp-env override (PHP ${{ matrix.php }}${{ steps.detect.outputs.beta && format(' + Elementor {0}', steps.detect.outputs.beta) || '' }})
+        run: |
+          # wp-env merges objects but replaces ARRAYS wholesale — when the beta
+          # overrides `plugins`, the full array must be repeated. phpVersion is
+          # a plain key and merges cleanly.
+          node -e '
+            const { readFileSync, writeFileSync } = require("fs")
+            const base = JSON.parse(readFileSync(".wp-env.json", "utf8"))
+            const override = { phpVersion: "${{ matrix.php }}" }
+            const beta = "${{ steps.detect.outputs.beta }}"
+            if (beta) {
+              override.plugins = base.plugins.map((p) =>
+                /downloads\.wordpress\.org\/plugin\/elementor\./.test(p)
+                  ? `https://downloads.wordpress.org/plugin/elementor.${beta}.zip`
+                  : p
+              )
+            }
+            writeFileSync(".wp-env.override.json", JSON.stringify(override, null, 2))
+          '
+
+      - name: Resolve slug
+        run: |
+          SLUG=$(node -e "import('./project.config.js').then(m => console.log(m.default.slug))")
+          echo "SLUG=$SLUG" >> "$GITHUB_ENV"
+
+      - name: Acquire cross-repo wp-env lock
+        uses: artkrsk/wordpress-plugin-workflows/actions/wp-env-lock@main
+        with:
+          mode: acquire
+          ports: ${{ inputs.wp_env_ports }}
+          project: ${{ env.SLUG }}
+
+      - name: Build plugin
+        run: pnpm build
+
+      - name: Start wp-env
+        run: pnpm exec wp-env start
+
+      - name: PHPUnit suites
+        run: |
+          echo '${{ inputs.integration_suites }}' | node -e '
+            const suites = JSON.parse(require("fs").readFileSync(0, "utf8"))
+            const { execSync } = require("child_process")
+            for (const cfg of suites) {
+              const flag = cfg ? ` -c ${cfg}` : ""
+              console.log(`\n=== PHPUnit${flag || " (default)"} ===`)
+              execSync(
+                `pnpm exec wp-env run tests-cli --env-cwd=test-workspace -- vendor/bin/phpunit${flag}`,
+                { stdio: "inherit" }
+              )
+            }
+          '
+
+      - name: Cleanup
+        if: always()
+        run: |
+          timeout --kill-after=30 180 pnpm exec wp-env destroy --force 2>/dev/null || true
+          rm -f .wp-env.override.json
+
+      - name: Release cross-repo wp-env lock
+        if: always()
+        uses: artkrsk/wordpress-plugin-workflows/actions/wp-env-lock@main
+        with:
+          mode: release
