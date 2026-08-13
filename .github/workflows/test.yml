@@ -15,6 +15,14 @@ on:
         description: Hard ceiling for the release zip, in MB (e.g. "0.25")
         required: true
         type: string
+      build_docs:
+        description: >
+          Build the VitePress docs in the quality job. deploy-docs only fires on
+          a push to the default branch, so without this a broken docs config
+          isn't discovered until after merge.
+        required: false
+        type: boolean
+        default: false
       run_js_tests:
         description: Run the Vitest suite in the quality job
         required: false
@@ -178,6 +186,10 @@ jobs:
           else
             echo "No phpcs.xml — skipped"
           fi
+
+      - name: Build docs
+        if: inputs.build_docs
+        run: pnpm exec vitepress build docs
 
       - name: Knip
         run: pnpm exec knip
