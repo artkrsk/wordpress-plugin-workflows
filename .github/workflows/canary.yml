@@ -200,14 +200,24 @@ jobs:
       - name: Update Elementor to detected beta
         if: steps.detect.outputs.beta != ''
         run: |
-          # wp.org plugin zips always use the bare slug as their internal top-level
-          # folder, even for betas — unlike installing the beta zip directly via
-          # wp-env's `plugins` config, which names the install folder after the URL
-          # (breaking on a non-numeric version suffix) and leaves nothing active
-          # under the plain `elementor` slug. `wp plugin update` forces a reinstall
-          # (--version implies --force) that replaces the existing elementor/
-          # directory in place, keeping the folder name and activation state intact.
-          pnpm exec wp-env run tests-cli -- wp plugin update elementor --version=${{ steps.detect.outputs.beta }}
+          # wp-env bind-mounts each `plugins` entry as its own directory, so
+          # `wp plugin update`/`install` can't replace it — WordPress's upgrader
+          # always tries to rmdir/move the destination first, which fails with
+          # "Resource busy" (EBUSY) against a mount point, breaking the install
+          # (confirmed live: it leaves an empty, unrecognized elementor/ dir).
+          # Overwriting the mounted directory's CONTENTS in place sidesteps that
+          # entirely — the mount point itself is never touched, and since this
+          # runs outside any WordPress request, none of Elementor's own upgrade
+          # hooks fire, so activation state and the options table are untouched.
+          pnpm exec wp-env run tests-cli -- bash -c '
+            set -e
+            cd wp-content/plugins/elementor
+            rm -rf ./* ./.[!.]* 2>/dev/null || true
+            curl -sL https://downloads.wordpress.org/plugin/elementor.${{ steps.detect.outputs.beta }}.zip -o /tmp/elementor-beta.zip
+            unzip -oq /tmp/elementor-beta.zip -d /tmp/elementor-beta
+            cp -a /tmp/elementor-beta/elementor/. .
+            rm -rf /tmp/elementor-beta /tmp/elementor-beta.zip
+          '
           pnpm exec wp-env run tests-cli -- wp plugin get elementor --field=version
 
       - name: PHPUnit suites
