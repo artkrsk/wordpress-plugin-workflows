@@ -149,7 +149,9 @@ jobs:
         run: |
           BETA=""
           if [ "${{ inputs.elementor_beta }}" = "true" ]; then
-            INFO=$(curl -s "https://api.wordpress.org/plugins/info/1.2/?action=plugin_information&request[slug]=elementor")
+            # -g/--globoff: curl treats unescaped [ ] as URL-glob syntax and
+            # otherwise fails the request with "URL malformed" (exit 3).
+            INFO=$(curl -sg "https://api.wordpress.org/plugins/info/1.2/?action=plugin_information&request[slug]=elementor")
             # The readme's "Beta tag:" header is optional and hand-maintained; the
             # versions map is wp.org's own record of every tag actually published,
             # so it still catches a beta the team forgot to declare.
