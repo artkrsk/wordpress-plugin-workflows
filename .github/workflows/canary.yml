@@ -27,7 +27,15 @@ on:
         description: JSON array of PHP versions for the integration canary
         required: false
         type: string
-        default: '["8.0", "8.4"]'
+        # The low leg tracks the oldest PHP upstream still BUILDS a wordpress
+        # image for, not the plugin's declared floor. php8.0/php8.1 variants
+        # are gone from docker-library, and the frozen php8.0 image is Debian
+        # 11 — its security pool emptied after LTS ended 2026-08-31 while the
+        # index still advertises the deleted debs, so wp-env's image build
+        # 404s on apt and cannot be made to succeed. The declared 8.0 floor is
+        # covered statically instead: PHPCompatibilityWP testVersion 8.0- and
+        # PHPStan phpVersion 80000.
+        default: '["8.2", "8.4"]'
       elementor_beta:
         description: Also run against the Elementor beta when one is ahead of stable
         required: false
