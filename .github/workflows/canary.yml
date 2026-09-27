@@ -115,7 +115,9 @@ jobs:
     name: Integration (PHP ${{ matrix.php }})
     if: inputs.integration_suites != '[]'
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 45
+    # Includes the wait for a host job slot inside "Set up runner" on the Pi
+    # (scripts/ci-job-slot.sh).
+    timeout-minutes: 120
     strategy:
       # One shared host: never parallel, never abort the sibling on failure —
       # each PHP version is an independent signal.

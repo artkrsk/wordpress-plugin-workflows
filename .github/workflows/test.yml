@@ -297,8 +297,10 @@ jobs:
     if: inputs.integration_suites != '[]' || inputs.integration_command != '' || inputs.run_e2e
     runs-on: ${{ inputs.runner }}
     # First run on a fresh runner downloads WP + plugin zips, builds arm64
-    # images, and sparse-clones the core PHPUnit suite.
-    timeout-minutes: 30
+    # images, and sparse-clones the core PHPUnit suite. On the Pi the job also
+    # waits for a host job slot inside "Set up runner" (scripts/ci-job-slot.sh),
+    # and that wait counts against this timeout.
+    timeout-minutes: 120
     steps:
       - name: Disable git hooks
         run: git config --global core.hooksPath /dev/null
