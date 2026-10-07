@@ -364,6 +364,9 @@ jobs:
           fi
 
           pnpm exec arts-wp changelog validate --version "$NEW"
+          # Extracted HERE, before `arts-wp release` bumps package.json: after the bump pnpm
+          # re-verifies dependencies and prints its own output into stdout (it ended up in a PR body).
+          pnpm exec arts-wp changelog extract --version "$NEW" > "$RUNNER_TEMP/entry.txt"
           echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
           echo "new_version=$NEW" >> "$GITHUB_OUTPUT"
 
@@ -418,7 +421,7 @@ jobs:
             echo "### Changelog entry"
             echo
             echo '```'
-            pnpm exec arts-wp changelog extract --version "$NEW"
+            cat "$RUNNER_TEMP/entry.txt"
             echo '```'
             echo
             echo "### Commits since $LAST_TAG touching \`$SHIPPED\`"
