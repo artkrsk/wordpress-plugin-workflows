@@ -225,6 +225,7 @@ jobs:
             echo "want_version=$WANT"
             echo "base_sha=$(git rev-parse HEAD)"
             echo "default_branch=$DEFAULT_BRANCH"
+            echo "recent_tags=$(git tag --sort=-v:refname --list 'v[0-9]*' | head -8 | tr '\n' ' ')"
           } >> "$GITHUB_OUTPUT"
           echo "Mode: $MODE (last tag $LAST_TAG, readme top ${README_V:-none}, composer $COMP_V)"
 
@@ -233,6 +234,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Draft changelog entry (Claude)
+        id: claude
         if: steps.detect.outputs.mode != 'skip'
         uses: anthropics/claude-code-action@v1
         with:
@@ -242,6 +244,7 @@ jobs:
           claude_args: >-
             --model ${{ inputs.model }}
             --max-turns ${{ inputs.max_turns }}
+            --add-dir ${{ runner.temp }}
             --allowedTools "Read,Edit,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git tag --list:*),Bash(git tag --sort:*),Bash(pnpm exec arts-wp changelog validate:*)"
           prompt: |
             You are preparing the next release of a WordPress.org plugin, in the checked-out repository.
@@ -253,6 +256,10 @@ jobs:
             - Mode: ${{ steps.detect.outputs.mode }}
             - Version to use (empty = you choose): ${{ steps.detect.outputs.want_version }}
             - Paths that ship to users: ${{ inputs.shipped_paths }}
+            - Recent tags, newest first: ${{ steps.detect.outputs.recent_tags }}
+
+            Run each shell command on its own: no pipes, redirects, && or subshells (the allow-list
+            matches single commands only). Use flags such as -n 30 to keep output short.
 
             Steps:
             1. Find what changed for users:
@@ -271,7 +278,7 @@ jobs:
                - Heading is "= X.Y.Z =" directly under "== Changelog ==", above the previous top entry.
             4. Version:
                - Mode draft with a version given: use exactly that version.
-               - Mode draft with no version: infer how this repository bumps from "git tag --sort=-v:refname"
+               - Mode draft with no version: infer how this repository bumps from the recent tags above
                  and its previous entries (patch for fixes and small additions, minor for larger new
                  capabilities, whichever the history shows). NEVER choose a major bump: if you believe a frozen
                  public contract (README "Integration contract", CLAUDE.md "Frozen contracts") was broken,
@@ -286,6 +293,26 @@ jobs:
             7. Write a short pull request summary to ${{ runner.temp }}/release-summary.md in exactly this shape:
                Bump: <patch|minor> - <one-line reason>
                Flags: <bullets, or "none">
+
+      # The action hides the transcript (public repos). This prints only what is needed to
+      # debug the step: cost, turns, denied tool calls and the final message.
+      - name: Claude digest
+        if: always() && steps.detect.outputs.mode != 'skip'
+        env:
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          [ -n "${EXEC_FILE:-}" ] && [ -f "$EXEC_FILE" ] || { echo "No execution file."; exit 0; }
+          {
+            echo "### Claude step"
+            echo
+            jq -r '.[] | select(.type=="result") |
+              "- turns: \(.num_turns), cost: $\(.total_cost_usd), denied tool calls: \((.permission_denials // []) | length)",
+              ((.permission_denials // [])[] | "  - denied `\(.tool_name)`: \(.tool_input | tostring | .[0:300])"),
+              "",
+              "Final message:",
+              "",
+              ((.result // "") | .[0:2000])' "$EXEC_FILE" || echo "(could not parse execution file)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Gate Claude's output
         id: gate
@@ -313,6 +340,10 @@ jobs:
             echo "$CHANGED"
             exit 1
           fi
+
+          echo "::group::Claude's change to $README"
+          git diff -- "$README"
+          echo "::endgroup::"
 
           NEW=$(awk '/^== Changelog ==/{f=1;next} f && /^= [0-9]+\.[0-9]+\.[0-9]+ =$/{gsub(/[= ]/,"");print;exit}' "$README")
           if [ -z "$NEW" ]; then
@@ -409,7 +440,7 @@ jobs:
             echo "git checkout main && git pull && git tag v$NEW && git push origin v$NEW"
             echo '```'
           } > "$BODY"
-          cat "$BODY" >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < "$BODY"
 
       - name: Close superseded release PRs
         if: steps.stamp.outcome == 'success' && !inputs.dry_run && steps.detect.outputs.open_prs != ''
