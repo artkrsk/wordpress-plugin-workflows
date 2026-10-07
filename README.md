@@ -9,6 +9,7 @@ Reusable GitHub Actions workflows for Arts WordPress plugins — the shared CI/C
 | `deploy-assets.yml` | wp.org listing assets (banners/icons/screenshots/blueprint) to SVN `assets/`, decoupled from releases; `dry_run` input |
 | `deploy-docs.yml` | VitePress docs → GitHub Pages (triggers stay in the caller) |
 | `canary.yml` | Weekly early warning: Plugin Check vs WP trunk + PHP min/max × Elementor-beta integration matrix |
+| `prepare-release.yml` | Release PR, everything before the tag: skips unless `src/` changed since the last `v*` tag, Claude drafts the readme.txt entry (it can only edit readme.txt), `arts-wp release` stamps the release commit, a GitHub App token pushes `release/x.y.z` and opens the PR so CI runs. Merging deploys nothing; pushing the tag does. Needs `CLAUDE_CODE_OAUTH_TOKEN`, plus `RELEASE_BOT_CLIENT_ID` (variable) and `RELEASE_BOT_PRIVATE_KEY` (secret) unless `dry_run` |
 
 Plus `actions/wp-env-lock` (the cross-repo Docker/wp-env host lock for the shared self-hosted runner) and `scripts/provision-runner.sh` (register a new repo's Pi runner — part of new-plugin bootstrap).
 
