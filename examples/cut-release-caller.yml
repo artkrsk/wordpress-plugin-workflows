@@ -1,0 +1,36 @@
+# .github/workflows/cut-release.yml in a plugin repo — thin caller of the reusable tagger.
+#
+# Runs when a pull request is closed. The job filter below is only a cheap pre-check so ordinary
+# PR merges do not start a job; the shared workflow re-validates everything (merged, same-repo head,
+# release/x.y.z branch, default-branch base) and verifies the release commit before it tags.
+#
+# `dry_run: true` reports what would be tagged and creates nothing. Flip it to `false` to let a
+# merged release PR tag its merge commit; the tag push then starts release.yml (SVN deploy).
+name: Cut Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+# One tag at a time, and never cancel one in flight.
+concurrency:
+  group: cut-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  cut:
+    if: >-
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release/') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    uses: artkrsk/wordpress-plugin-workflows/.github/workflows/cut-release.yml@main
+    with:
+      client_id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+      dry_run: true # flip to false once the dry runs look right
+      # readme_path: 'src/wordpress-plugin/readme.txt'
+    secrets:
+      RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}

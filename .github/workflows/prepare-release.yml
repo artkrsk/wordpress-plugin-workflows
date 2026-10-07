@@ -1,0 +1,500 @@
+name: Prepare Release
+
+# Reusable "release PR" pipeline. Everything BEFORE the tag, so the tag-triggered
+# release.yml (GitHub Release + wp.org SVN) stays the single, human-gated deploy path:
+#
+#   detect (shell) -> Claude drafts the readme.txt entry -> gate (shell)
+#   -> `arts-wp release` stamps the release commit -> push branch -> open PR
+#
+# Claude only edits readme.txt. It cannot commit, push or open PRs: those steps run
+# as plain shell with a GitHub App token (events from GITHUB_TOKEN would not start
+# the PR's CI). Merging the PR deploys nothing; pushing the vX.Y.Z tag does.
+#
+# The caller owns triggers, concurrency (cancel-in-progress: false) and permissions.
+# dry_run needs only CLAUDE_CODE_OAUTH_TOKEN: it stops after stamping and prints the
+# entry + diff stat to the job summary.
+
+on:
+  workflow_call:
+    inputs:
+      client_id:
+        description: Client ID of the release GitHub App (not needed for dry_run)
+        required: false
+        type: string
+        default: ''
+      version:
+        description: Force this x.y.z (closes an open release PR first); empty = Claude decides
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: Stop before pushing; print the entry and diff stat to the job summary
+        required: false
+        type: boolean
+        default: false
+      runner:
+        description: Runner label
+        required: false
+        type: string
+        default: ubuntu-latest
+      node_version:
+        description: Node.js version
+        required: false
+        type: string
+        default: '24'
+      shipped_paths:
+        description: Space-separated paths whose changes make a release worthwhile (Renovate/CI churn lives outside them)
+        required: false
+        type: string
+        default: src/
+      readme_path:
+        description: Path to readme.txt (the changelog source)
+        required: false
+        type: string
+        default: src/wordpress-plugin/readme.txt
+      model:
+        description: Claude model for the drafting step
+        required: false
+        type: string
+        default: claude-sonnet-5-5
+      max_turns:
+        description: Turn cap for the drafting step
+        required: false
+        type: string
+        default: '20'
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        description: Claude Code OAuth token (claude setup-token)
+        required: true
+      RELEASE_BOT_PRIVATE_KEY:
+        description: Private key of the release GitHub App (not needed for dry_run)
+        required: false
+    outputs:
+      result:
+        description: skipped | dry-run | pr-opened
+        value: ${{ jobs.prepare.outputs.result }}
+      version:
+        description: Release version prepared (empty when skipped)
+        value: ${{ jobs.prepare.outputs.version }}
+      pr_url:
+        description: URL of the opened release PR (empty unless pr-opened)
+        value: ${{ jobs.prepare.outputs.pr_url }}
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare release PR
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write # claude-code-action default auth
+    outputs:
+      result: ${{ steps.finish.outputs.result }}
+      version: ${{ steps.finish.outputs.version }}
+      pr_url: ${{ steps.finish.outputs.pr_url }}
+    steps:
+      - name: Disable git hooks
+        run: git config --global core.hooksPath /dev/null
+
+      - name: Validate inputs
+        env:
+          VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          APP_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+        run: |
+          if [ -n "$VERSION" ] && ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must be x.y.z, got '$VERSION'"
+            exit 1
+          fi
+          if [ "$DRY_RUN" != "true" ] && { [ -z "$CLIENT_ID" ] || [ -z "$APP_KEY" ]; }; then
+            echo "::error::client_id and RELEASE_BOT_PRIVATE_KEY are required unless dry_run is true"
+            exit 1
+          fi
+
+      # Minted first so the push/PR steps can use it; the checkout itself does NOT
+      # persist credentials, keeping the write token off disk while Claude runs.
+      - name: Mint release app token
+        id: app
+        if: ${{ !inputs.dry_run }}
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ inputs.client_id }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        if: runner.environment == 'github-hosted'
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Setup pnpm
+        if: runner.environment == 'github-hosted'
+        run: corepack enable
+
+      - name: Detect shippable changes
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCED: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          SHIPPED: ${{ inputs.shipped_paths }}
+          README: ${{ inputs.readme_path }}
+        run: |
+          set -euo pipefail
+
+          skip() {
+            echo "mode=skip" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Prepare release: skipped"
+              echo
+              echo "$1"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::Skipped: $1"
+            exit 0
+          }
+
+          DEFAULT_BRANCH=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)
+          if [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ] && [ "$DRY_RUN" != "true" ]; then
+            echo "::error::Release PRs are cut from $DEFAULT_BRANCH; this run is on $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+          LAST_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
+          if ! [[ "$LAST_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::No vX.Y.Z tag reachable from HEAD (first releases are not automated)"
+            exit 1
+          fi
+          TAG_V="${LAST_TAG#v}"
+
+          COMP_V=$(node -p "require('./composer.json').version")
+          README_V=$(awk '/^== Changelog ==/{f=1;next} f && /^= [0-9]+\.[0-9]+\.[0-9]+ =$/{gsub(/[= ]/,"");print;exit}' "$README")
+
+          {
+            echo "last_tag=$LAST_TAG"
+            echo "tag_version=$TAG_V"
+            echo "readme_version=$README_V"
+          } >> "$GITHUB_OUTPUT"
+
+          # A release commit that was merged but never tagged: wait for the tag.
+          if [ "$COMP_V" != "$TAG_V" ]; then
+            skip "composer.json is at $COMP_V but the last tag is $LAST_TAG: the $COMP_V release is committed and not tagged yet. Push the tag, then re-run."
+          fi
+
+          OPEN_PRS=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName \
+            --jq '[.[] | select(.headRefName | startswith("release/"))] | map(.number) | join(" ")')
+          if [ -n "$OPEN_PRS" ] && [ -z "$FORCED" ]; then
+            skip "A release PR is already open (#${OPEN_PRS// /, #}). Merge or close it first, or re-run with an explicit version to replace it."
+          fi
+          echo "open_prs=$OPEN_PRS" >> "$GITHUB_OUTPUT"
+
+          higher() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ] && [ "$1" != "$2" ]; }
+
+          if [ -n "$FORCED" ]; then
+            higher "$FORCED" "$TAG_V" || { echo "::error::Forced version $FORCED must be higher than $TAG_V"; exit 1; }
+            MODE=draft
+            [ "$README_V" = "$FORCED" ] && MODE=verify
+            WANT="$FORCED"
+          elif [ -n "$README_V" ] && higher "$README_V" "$COMP_V"; then
+            # The maintainer already wrote the entry ahead of the release commit.
+            MODE=verify
+            WANT="$README_V"
+          else
+            WANT=""
+            # shellcheck disable=SC2086
+            if git diff --quiet "$LAST_TAG" HEAD -- $SHIPPED; then
+              skip "No changes under \`$SHIPPED\` since $LAST_TAG (dependency and CI churn does not trigger a release)."
+            fi
+            MODE=draft
+          fi
+
+          {
+            echo "mode=$MODE"
+            echo "want_version=$WANT"
+            echo "base_sha=$(git rev-parse HEAD)"
+            echo "default_branch=$DEFAULT_BRANCH"
+            echo "recent_tags=$(git tag --sort=-v:refname --list 'v[0-9]*' | head -8 | tr '\n' ' ')"
+          } >> "$GITHUB_OUTPUT"
+          echo "Mode: $MODE (last tag $LAST_TAG, readme top ${README_V:-none}, composer $COMP_V)"
+
+      - name: Install dependencies
+        if: steps.detect.outputs.mode != 'skip'
+        run: pnpm install --frozen-lockfile
+
+      - name: Draft changelog entry (Claude)
+        id: claude
+        if: steps.detect.outputs.mode != 'skip'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Read-only token: Claude never writes to GitHub, the shell steps below do.
+          github_token: ${{ github.token }}
+          claude_args: >-
+            --model ${{ inputs.model }}
+            --max-turns ${{ inputs.max_turns }}
+            --add-dir ${{ runner.temp }}
+            --allowedTools "Read,Edit,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git tag --list:*),Bash(git tag --sort:*),Bash(pnpm exec arts-wp changelog validate:*)"
+          prompt: |
+            You are preparing the next release of a WordPress.org plugin, in the checked-out repository.
+            You may edit exactly one repository file: ${{ inputs.readme_path }}. Do not commit, push,
+            tag or call gh; the workflow does that after checking your work.
+
+            Facts computed by the workflow (trust them):
+            - Last release tag: ${{ steps.detect.outputs.last_tag }}
+            - Mode: ${{ steps.detect.outputs.mode }}
+            - Version to use (empty = you choose): ${{ steps.detect.outputs.want_version }}
+            - Paths that ship to users: ${{ inputs.shipped_paths }}
+            - Recent tags, newest first: ${{ steps.detect.outputs.recent_tags }}
+
+            Run each shell command on its own: no pipes, redirects, && or subshells (the allow-list
+            matches single commands only). Use flags such as -n 30 to keep output short.
+
+            Steps:
+            1. Find what changed for users:
+               git log --no-merges --format='%h %s%n%b---' ${{ steps.detect.outputs.last_tag }}..HEAD -- ${{ inputs.shipped_paths }}
+               and, where a message is unclear, git diff ${{ steps.detect.outputs.last_tag }}..HEAD -- ${{ inputs.shipped_paths }}.
+               Ignore dependency bumps, CI, tests, refactors, docs-only and internal renames, unless they
+               change what site owners see or what developers integrating with the plugin can call.
+            2. Read the top three entries under "== Changelog ==" in ${{ inputs.readme_path }} and match their
+               tone, length and level of detail. Readers on WordPress.org are mostly non-technical: describe
+               the effect they will notice, not the implementation. No file names, class names or commit
+               hashes; public API names that integrators call are fine when the change is that API.
+            3. Entry rules (checked by tooling):
+               - Every line is "* added: ...", "* improved: ...", "* fixed: ..." or "* security: ...",
+                 lowercase prefix, one sentence, ending with a period.
+               - Group in that order: added, improved, fixed, security.
+               - Heading is "= X.Y.Z =" directly under "== Changelog ==", above the previous top entry.
+            4. Version:
+               - Mode draft with a version given: use exactly that version.
+               - Mode draft with no version: infer how this repository bumps from the recent tags above
+                 and its previous entries (patch for fixes and small additions, minor for larger new
+                 capabilities, whichever the history shows). NEVER choose a major bump: if you believe a frozen
+                 public contract (README "Integration contract", CLAUDE.md "Frozen contracts") was broken,
+                 write that under Flags in the summary and still use the smaller bump.
+               - Mode verify: the maintainer already wrote the "= ${{ steps.detect.outputs.want_version }} =" entry.
+                 Keep its version and existing wording untouched. Only append bullets for user-visible
+                 changes it misses, in the right group. If it is complete, change nothing.
+            5. Run: pnpm exec arts-wp changelog validate --version <X.Y.Z>
+               Fix the entry and re-run until it passes.
+            6. If nothing user-visible changed since the tag, edit nothing and write one sentence saying why
+               to ${{ runner.temp }}/release-skip.txt, then stop.
+            7. Write a short pull request summary to ${{ runner.temp }}/release-summary.md in exactly this shape:
+               Bump: <patch|minor> - <one-line reason>
+               Flags: <bullets, or "none">
+
+      # The action hides the transcript (public repos). This prints only what is needed to
+      # debug the step: cost, turns, denied tool calls and the final message.
+      - name: Claude digest
+        if: always() && steps.detect.outputs.mode != 'skip'
+        env:
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          [ -n "${EXEC_FILE:-}" ] && [ -f "$EXEC_FILE" ] || { echo "No execution file."; exit 0; }
+          {
+            echo "### Claude step"
+            echo
+            jq -r '.[] | select(.type=="result") |
+              "- turns: \(.num_turns), cost: $\(.total_cost_usd), denied tool calls: \((.permission_denials // []) | length)",
+              ((.permission_denials // [])[] | "  - denied `\(.tool_name)`: \(.tool_input | tostring | .[0:300])"),
+              "",
+              "Final message:",
+              "",
+              ((.result // "") | .[0:2000])' "$EXEC_FILE" || echo "(could not parse execution file)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Gate Claude's output
+        id: gate
+        if: steps.detect.outputs.mode != 'skip'
+        env:
+          README: ${{ inputs.readme_path }}
+          MODE: ${{ steps.detect.outputs.mode }}
+          WANT: ${{ steps.detect.outputs.want_version }}
+          TAG_V: ${{ steps.detect.outputs.tag_version }}
+        run: |
+          set -euo pipefail
+
+          if [ -s "$RUNNER_TEMP/release-skip.txt" ]; then
+            echo "mode=skip" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Prepare release: nothing to ship"
+              cat "$RUNNER_TEMP/release-skip.txt"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          CHANGED=$(git status --porcelain --untracked-files=all)
+          if [ -n "$CHANGED" ] && [ "$CHANGED" != " M $README" ]; then
+            echo "::error::Claude changed files other than $README:"
+            echo "$CHANGED"
+            exit 1
+          fi
+
+          echo "::group::Claude's change to $README"
+          git diff -- "$README"
+          echo "::endgroup::"
+
+          NEW=$(awk '/^== Changelog ==/{f=1;next} f && /^= [0-9]+\.[0-9]+\.[0-9]+ =$/{gsub(/[= ]/,"");print;exit}' "$README")
+          if [ -z "$NEW" ]; then
+            echo "::error::No '= x.y.z =' entry found under == Changelog == in $README"
+            exit 1
+          fi
+          if [ -n "$WANT" ] && [ "$NEW" != "$WANT" ]; then
+            echo "::error::Expected version $WANT but the top entry is $NEW"
+            exit 1
+          fi
+          if [ "$NEW" = "$TAG_V" ] || [ "$(printf '%s\n%s\n' "$TAG_V" "$NEW" | sort -V | tail -1)" != "$NEW" ]; then
+            echo "::error::New version $NEW must be higher than the last tag ($TAG_V)"
+            exit 1
+          fi
+          if [ "${NEW%%.*}" != "${TAG_V%%.*}" ]; then
+            echo "::error::Major bump $TAG_V -> $NEW is never automated; pass the version explicitly and review the contract"
+            exit 1
+          fi
+
+          pnpm exec arts-wp changelog validate --version "$NEW"
+          # Extracted HERE, before `arts-wp release` bumps package.json: after the bump pnpm
+          # re-verifies dependencies and prints its own output into stdout (it ended up in a PR body).
+          pnpm exec arts-wp changelog extract --version "$NEW" > "$RUNNER_TEMP/entry.txt"
+          echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
+          echo "new_version=$NEW" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp release commit
+        id: stamp
+        if: steps.detect.outputs.mode != 'skip' && steps.gate.outputs.mode != 'skip'
+        env:
+          NEW: ${{ steps.gate.outputs.new_version }}
+          README: ${{ inputs.readme_path }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$APP_SLUG" ]; then
+            BOT_ID=$(gh api "users/${APP_SLUG}[bot]" --jq .id)
+            git config user.name "${APP_SLUG}[bot]"
+            git config user.email "${BOT_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          fi
+
+          git checkout -b "release/$NEW"
+
+          # arts-wp release needs a clean tree with the entry already committed.
+          if ! git diff --quiet; then
+            git add "$README"
+            git commit -m "docs: add $NEW changelog"
+          fi
+
+          # Bumps composer.json, stamps header/readme/package.json, syncs CHANGELOG.md,
+          # commits "Release $NEW" and tags v$NEW locally. The tag is dropped: the human
+          # (or cut-release) tags the MERGE commit; a squash merge changes the SHA.
+          pnpm exec arts-wp release "$NEW"
+          git tag -d "v$NEW"
+
+      - name: Summarize
+        if: steps.stamp.outcome == 'success'
+        env:
+          NEW: ${{ steps.gate.outputs.new_version }}
+          BASE_SHA: ${{ steps.detect.outputs.base_sha }}
+          LAST_TAG: ${{ steps.detect.outputs.last_tag }}
+          SHIPPED: ${{ inputs.shipped_paths }}
+        run: |
+          set -euo pipefail
+          BODY="$RUNNER_TEMP/pr-body.md"
+          {
+            echo "## Release $NEW"
+            echo
+            if [ -f "$RUNNER_TEMP/release-summary.md" ]; then cat "$RUNNER_TEMP/release-summary.md"; echo; fi
+            echo "### Changelog entry"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/entry.txt"
+            echo '```'
+            echo
+            echo "### Commits since $LAST_TAG touching \`$SHIPPED\`"
+            echo
+            # shellcheck disable=SC2086
+            git log --no-merges --format='- %h %s' "$LAST_TAG..$BASE_SHA" -- $SHIPPED
+            echo
+            echo "### Files changed by this PR"
+            echo
+            echo '```'
+            git diff --stat "$BASE_SHA"..HEAD
+            echo '```'
+            echo
+            echo "### After merging"
+            echo
+            echo "Merging deploys nothing. A squash merge changes the commit SHA, so tag the merge commit on the default branch, then push the tag to start the release workflow:"
+            echo
+            echo '```'
+            echo "git checkout main && git pull && git tag v$NEW && git push origin v$NEW"
+            echo '```'
+          } > "$BODY"
+          tee -a "$GITHUB_STEP_SUMMARY" < "$BODY"
+
+      - name: Close superseded release PRs
+        if: steps.stamp.outcome == 'success' && !inputs.dry_run && steps.detect.outputs.open_prs != ''
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          OPEN_PRS: ${{ steps.detect.outputs.open_prs }}
+          NEW: ${{ steps.gate.outputs.new_version }}
+        run: |
+          for n in $OPEN_PRS; do
+            gh pr close "$n" --delete-branch --comment "Superseded by the release PR for $NEW."
+          done
+
+      - name: Push branch and open PR
+        id: pr
+        if: steps.stamp.outcome == 'success' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          NEW: ${{ steps.gate.outputs.new_version }}
+          BASE: ${{ steps.detect.outputs.default_branch }}
+        run: |
+          set -euo pipefail
+          # Token goes on the command line only for this push (persist-credentials is off).
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/release/${NEW}"
+          URL=$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "release/${NEW}" \
+            --title "Release ${NEW}" --body-file "$RUNNER_TEMP/pr-body.md")
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Opened $URL"
+
+      - name: Finish
+        id: finish
+        if: always()
+        env:
+          MODE: ${{ steps.detect.outputs.mode }}
+          GATE_MODE: ${{ steps.gate.outputs.mode }}
+          STAMPED: ${{ steps.stamp.outcome }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          NEW: ${{ steps.gate.outputs.new_version }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+        run: |
+          if [ "$MODE" = "skip" ] || [ "$GATE_MODE" = "skip" ] || [ "$STAMPED" != "success" ]; then
+            RESULT=skipped
+          elif [ "$DRY_RUN" = "true" ]; then
+            RESULT=dry-run
+          elif [ -n "$PR_URL" ]; then
+            RESULT=pr-opened
+          else
+            RESULT=skipped
+          fi
+          {
+            echo "result=$RESULT"
+            echo "version=${NEW:-}"
+            echo "pr_url=${PR_URL:-}"
+          } >> "$GITHUB_OUTPUT"
