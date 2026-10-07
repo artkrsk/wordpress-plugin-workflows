@@ -1,0 +1,210 @@
+name: Cut Release
+
+# Second half of the release-PR pipeline (the first is prepare-release.yml): when a
+# `release/x.y.z` PR from this repository is merged, verify the merge commit and tag it
+# `vX.Y.Z`. The tag is created with a GitHub App token, so the push event starts the
+# caller's tag-triggered release.yml (GitHub Release + wp.org SVN) natively. Events from
+# GITHUB_TOKEN would not start it.
+#
+# The caller owns the trigger:
+#   on: pull_request: { types: [closed], branches: [main] }
+# and should gate its job on merged + head ref `release/*` + same-repo head. This workflow
+# re-checks all of that: it is the only thing that can start a wp.org deploy.
+#
+# dry_run (default TRUE) verifies everything and reports what it would tag, creating nothing.
+# A pull_request trigger has no inputs, so the caller enables real tagging by passing
+# `dry_run: false` in its own `with:` block.
+
+on:
+  workflow_call:
+    inputs:
+      client_id:
+        description: Client ID of the release GitHub App (not needed for dry_run)
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: Verify and report only; create no tag
+        required: false
+        type: boolean
+        default: true
+      runner:
+        description: Runner label
+        required: false
+        type: string
+        default: ubuntu-latest
+      readme_path:
+        description: Path to readme.txt (stable tag and changelog are verified against the version)
+        required: false
+        type: string
+        default: src/wordpress-plugin/readme.txt
+    secrets:
+      RELEASE_BOT_PRIVATE_KEY:
+        description: Private key of the release GitHub App (not needed for dry_run)
+        required: false
+    outputs:
+      result:
+        description: skipped | dry-run | tagged
+        value: ${{ jobs.cut.outputs.result }}
+      tag:
+        description: Tag name (vX.Y.Z) when one was or would be created
+        value: ${{ jobs.cut.outputs.tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  cut:
+    name: Tag merged release
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.finish.outputs.result }}
+      tag: ${{ steps.trigger.outputs.tag }}
+    steps:
+      - name: Disable git hooks
+        run: git config --global core.hooksPath /dev/null
+
+      # Everything here comes from the event payload; it reaches the script through env only.
+      - name: Validate trigger
+        id: trigger
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          MERGED: ${{ github.event.pull_request.merged }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          APP_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          [ "$EVENT_NAME" = "pull_request" ] && [ "$ACTION" = "closed" ] || { echo "::error::Expected a pull_request closed event, got $EVENT_NAME/$ACTION"; exit 1; }
+          [ "$MERGED" = "true" ] || { echo "::error::The pull request was closed without merging"; exit 1; }
+          [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ] || { echo "::error::Release PRs must come from this repository, not $HEAD_REPO"; exit 1; }
+          [ "$BASE_REF" = "$DEFAULT_BRANCH" ] || { echo "::error::Base branch is $BASE_REF, expected $DEFAULT_BRANCH"; exit 1; }
+          [[ "$HEAD_REF" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Head branch '$HEAD_REF' is not release/x.y.z"; exit 1; }
+          [[ "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::No merge commit SHA on the event"; exit 1; }
+
+          if [ "$DRY_RUN" != "true" ] && { [ -z "$CLIENT_ID" ] || [ -z "$APP_KEY" ]; }; then
+            echo "::error::client_id and RELEASE_BOT_PRIVATE_KEY are required unless dry_run is true"
+            exit 1
+          fi
+
+          VERSION="${HEAD_REF#release/}"
+          {
+            echo "version=$VERSION"
+            echo "tag=v$VERSION"
+            echo "sha=$MERGE_SHA"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mint release app token
+        id: app
+        if: ${{ !inputs.dry_run }}
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ inputs.client_id }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout merge commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.trigger.outputs.sha }}
+          persist-credentials: false
+
+      - name: Verify the release commit
+        id: verify
+        env:
+          VERSION: ${{ steps.trigger.outputs.version }}
+          TAG: ${{ steps.trigger.outputs.tag }}
+          README: ${{ inputs.readme_path }}
+        run: |
+          set -euo pipefail
+
+          skip() {
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Cut release: skipped"
+              echo
+              echo "$1"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::Skipped: $1"
+            exit 0
+          }
+
+          # Failing here is the point: a release PR whose files disagree must never be tagged.
+          COMP_V=$(node -p "require('./composer.json').version")
+          STABLE_V=$(grep -m1 '^Stable tag:' "$README" | awk '{print $3}' | tr -d '\r')
+          TOP_V=$(awk '/^== Changelog ==/{f=1;next} f && /^= [0-9]+\.[0-9]+\.[0-9]+ =$/{gsub(/[= ]/,"");print;exit}' "$README")
+          for pair in "composer.json:$COMP_V" "readme.txt Stable tag:$STABLE_V" "readme.txt top changelog entry:$TOP_V"; do
+            [ "${pair##*:}" = "$VERSION" ] || { echo "::error::${pair%%:*} is '${pair##*:}', expected $VERSION; refusing to tag"; exit 1; }
+          done
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            skip "Tag $TAG already exists; nothing to do."
+          fi
+
+          HIGHEST=$(git ls-remote --tags --refs origin 'refs/tags/v[0-9]*' | sed 's#.*refs/tags/v##' | sort -V | tail -1)
+          if [ -n "$HIGHEST" ] && [ "$(printf '%s\n%s\n' "$HIGHEST" "$VERSION" | sort -V | tail -1)" != "$VERSION" ]; then
+            echo "::error::$VERSION is not higher than the latest tag v$HIGHEST; refusing to tag"
+            exit 1
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Release commit for $VERSION verified (latest tag: v${HIGHEST:-none})."
+
+      - name: Report (dry run)
+        if: steps.verify.outputs.skip == 'false' && inputs.dry_run
+        env:
+          TAG: ${{ steps.trigger.outputs.tag }}
+          SHA: ${{ steps.trigger.outputs.sha }}
+        run: |
+          {
+            echo "## Cut release: dry run"
+            echo
+            echo "Verified. Would create tag \`$TAG\` at \`$SHA\` and start the release workflow. Nothing was created."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Create tag
+        id: tag
+        if: steps.verify.outputs.skip == 'false' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TAG: ${{ steps.trigger.outputs.tag }}
+          SHA: ${{ steps.trigger.outputs.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Lightweight tag, like `arts-wp release` makes. Created by the App, so its push
+          # event starts the tag-triggered release workflow.
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" --jq '.ref'
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "Tagged \`$TAG\` at \`${SHA:0:7}\`. The release workflow should be starting: https://github.com/$GITHUB_REPOSITORY/actions/workflows/release.yml"
+          {
+            echo "## Cut release: tagged"
+            echo
+            echo "Created \`$TAG\` at \`$SHA\`."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Finish
+        id: finish
+        if: always()
+        env:
+          SKIP: ${{ steps.verify.outputs.skip }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          TAG_OUTCOME: ${{ steps.tag.outcome }}
+        run: |
+          if [ "$SKIP" != "false" ]; then RESULT=skipped
+          elif [ "$DRY_RUN" = "true" ]; then RESULT=dry-run
+          elif [ "$TAG_OUTCOME" = "success" ]; then RESULT=tagged
+          else RESULT=skipped
+          fi
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
