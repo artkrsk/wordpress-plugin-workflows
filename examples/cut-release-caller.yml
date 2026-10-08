@@ -1,17 +1,32 @@
 # .github/workflows/cut-release.yml in a plugin repo — thin caller of the reusable tagger.
 #
-# Runs when a pull request is closed. The job filter below is only a cheap pre-check so ordinary
-# PR merges do not start a job; the shared workflow re-validates everything (merged, same-repo head,
-# release/x.y.z branch, default-branch base) and verifies the release commit before it tags.
+# Two triggers:
+#   - pull_request closed: when a release/x.y.z PR is merged, the merge commit is verified and tagged,
+#     which starts release.yml (GitHub Release + wp.org SVN). Live as written.
+#   - workflow_dispatch: tag an already-merged release PR on demand (recovery: the PR merged before
+#     this workflow existed, or its event never arrived). Dry run by default; untick it to tag for real.
 #
-# `dry_run: true` reports what would be tagged and creates nothing. Flip it to `false` to let a
-# merged release PR tag its merge commit; the tag push then starts release.yml (SVN deploy).
+# The job filter is only a cheap pre-check so ordinary PR merges do not start a job. The shared
+# workflow re-validates everything (merged, same-repo head, release/x.y.z branch, default-branch base)
+# and verifies the release commit before it tags. To make the automatic path report-only instead,
+# change `dry_run` below to `true`.
 name: Cut Release
 
 on:
   pull_request:
     types: [closed]
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Merged release PR to tag (number)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Verify and report only; create no tag'
+        required: false
+        type: boolean
+        default: true
 
 # One tag at a time, and never cancel one in flight.
 concurrency:
@@ -20,17 +35,21 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   cut:
     if: >-
-      github.event.pull_request.merged == true &&
-      startsWith(github.event.pull_request.head.ref, 'release/') &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       startsWith(github.event.pull_request.head.ref, 'release/') &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     uses: artkrsk/wordpress-plugin-workflows/.github/workflows/cut-release.yml@main
     with:
       client_id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
-      dry_run: true # flip to false once the dry runs look right
+      pr_number: ${{ inputs.pr_number }}
+      # pull_request events have no inputs, so this is false (live) on merge and true (dry) by default on manual runs
+      dry_run: ${{ inputs.dry_run == true }}
       # readme_path: 'src/wordpress-plugin/readme.txt'
     secrets:
       RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
