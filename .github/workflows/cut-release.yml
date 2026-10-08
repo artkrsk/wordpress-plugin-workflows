@@ -178,7 +178,11 @@ jobs:
           HEAD_SHA: ${{ steps.trigger.outputs.head_sha }}
         run: |
           set -euo pipefail
-          RUNS=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100" --jq '.check_runs')
+          # This job is itself triggered by `pull_request`, so GitHub lists its OWN run as a
+          # check-run on this exact head commit, perpetually "in_progress" while we're inside it.
+          # Left in, the gate would refuse every normal merge, forever. Filter it out by run ID.
+          RUNS=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100" \
+            --jq "[.check_runs[] | select(.html_url | contains(\"/runs/$GITHUB_RUN_ID/\") | not)]")
           COUNT=$(jq 'length' <<<"$RUNS")
           if [ "$COUNT" -eq 0 ]; then
             echo "::error::No check runs found on the PR head commit ($HEAD_SHA); refusing to tag"
