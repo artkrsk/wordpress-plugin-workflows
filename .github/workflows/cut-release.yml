@@ -6,14 +6,17 @@ name: Cut Release
 # caller's tag-triggered release.yml (GitHub Release + wp.org SVN) natively. Events from
 # GITHUB_TOKEN would not start it.
 #
-# The caller owns the trigger:
-#   on: pull_request: { types: [closed], branches: [main] }
-# and should gate its job on merged + head ref `release/*` + same-repo head. This workflow
-# re-checks all of that: it is the only thing that can start a wp.org deploy.
+# The caller owns the triggers:
+#   on: pull_request: { types: [closed], branches: [main] }   (automatic, on merge)
+#   on: workflow_dispatch: { inputs: pr_number, dry_run }      (manual, for a merged release PR)
+# and should gate its job on merged + head ref `release/*` + same-repo head for the PR event.
+# This workflow re-checks all of that: it is the only thing that can start a wp.org deploy.
+# The manual path exists for recovery: a release PR merged before this workflow was installed,
+# or an event that never arrived, can be tagged on demand with the same verification.
 #
-# dry_run (default TRUE) verifies everything and reports what it would tag, creating nothing.
-# A pull_request trigger has no inputs, so the caller enables real tagging by passing
-# `dry_run: false` in its own `with:` block.
+# dry_run (default TRUE here) verifies everything and reports what it would tag, creating
+# nothing. A pull_request trigger has no inputs, so the caller decides: pass
+# `dry_run: ${{ inputs.dry_run == true }}` to be live on merge and dry by default on manual runs.
 
 on:
   workflow_call:
@@ -33,6 +36,11 @@ on:
         required: false
         type: string
         default: ubuntu-latest
+      pr_number:
+        description: Merged release PR to tag (manual workflow_dispatch runs only)
+        required: false
+        type: string
+        default: ''
       readme_path:
         description: Path to readme.txt (stable tag and changelog are verified against the version)
         required: false
@@ -60,6 +68,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       result: ${{ steps.finish.outputs.result }}
       tag: ${{ steps.trigger.outputs.tag }}
@@ -78,6 +87,9 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          PR_EVENT: ${{ github.event.pull_request.number }}
+          PR_INPUT: ${{ inputs.pr_number }}
+          GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           DRY_RUN: ${{ inputs.dry_run }}
           CLIENT_ID: ${{ inputs.client_id }}
@@ -85,7 +97,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          [ "$EVENT_NAME" = "pull_request" ] && [ "$ACTION" = "closed" ] || { echo "::error::Expected a pull_request closed event, got $EVENT_NAME/$ACTION"; exit 1; }
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Manual recovery path: read the PR from the API instead of the event payload.
+            [[ "$PR_INPUT" =~ ^[0-9]+$ ]] || { echo "::error::pr_number must be a pull request number, got '$PR_INPUT'"; exit 1; }
+            [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ] || { echo "::error::Run this from $DEFAULT_BRANCH, not $GITHUB_REF_NAME"; exit 1; }
+            PR_NUMBER="$PR_INPUT"
+            PR_JSON=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+            MERGED=$(jq -r '.merged' <<<"$PR_JSON")
+            HEAD_REPO=$(jq -r '.head.repo.full_name // ""' <<<"$PR_JSON")
+            HEAD_REF=$(jq -r '.head.ref' <<<"$PR_JSON")
+            BASE_REF=$(jq -r '.base.ref' <<<"$PR_JSON")
+            MERGE_SHA=$(jq -r '.merge_commit_sha // ""' <<<"$PR_JSON")
+          else
+            [ "$EVENT_NAME" = "pull_request" ] && [ "$ACTION" = "closed" ] || { echo "::error::Expected a pull_request closed or workflow_dispatch event, got $EVENT_NAME/$ACTION"; exit 1; }
+            PR_NUMBER="$PR_EVENT"
+          fi
           [ "$MERGED" = "true" ] || { echo "::error::The pull request was closed without merging"; exit 1; }
           [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ] || { echo "::error::Release PRs must come from this repository, not $HEAD_REPO"; exit 1; }
           [ "$BASE_REF" = "$DEFAULT_BRANCH" ] || { echo "::error::Base branch is $BASE_REF, expected $DEFAULT_BRANCH"; exit 1; }
@@ -102,6 +128,7 @@ jobs:
             echo "version=$VERSION"
             echo "tag=v$VERSION"
             echo "sha=$MERGE_SHA"
+            echo "pr=$PR_NUMBER"
           } >> "$GITHUB_OUTPUT"
 
       - name: Mint release app token
@@ -180,7 +207,7 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           TAG: ${{ steps.trigger.outputs.tag }}
           SHA: ${{ steps.trigger.outputs.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.trigger.outputs.pr }}
         run: |
           set -euo pipefail
           # Lightweight tag, like `arts-wp release` makes. Created by the App, so its push
