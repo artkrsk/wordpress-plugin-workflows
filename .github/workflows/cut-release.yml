@@ -17,6 +17,16 @@ name: Cut Release
 # dry_run (default TRUE here) verifies everything and reports what it would tag, creating
 # nothing. A pull_request trigger has no inputs, so the caller decides: pass
 # `dry_run: ${{ inputs.dry_run == true }}` to be live on merge and dry by default on manual runs.
+#
+# Two more refusals before a tag is ever created, because tagging is the only thing standing
+# between a merge and a wp.org deploy:
+#   - CI gate: every check run on the PR's head commit must have completed green. The required-
+#     status-checks ruleset normally guarantees this, but its bypass actors (repo admins) can
+#     merge around it, so this is the backstop for that case, not a duplicate of it.
+#   - Staleness gate: if anything under shipped_paths landed on the default branch between the
+#     PR's head commit and its merge commit (another PR merged first, or a direct push), the
+#     merge commit ships changes the release PR's changelog never saw. Refuses rather than
+#     tagging silently; re-run prepare-release to fold the missed changes into a new release PR.
 
 on:
   workflow_call:
@@ -46,6 +56,11 @@ on:
         required: false
         type: string
         default: src/wordpress-plugin/readme.txt
+      shipped_paths:
+        description: Space-separated paths; a change under them landing on the default branch after the PR's head commit refuses the tag (same meaning as prepare-release's input)
+        required: false
+        type: string
+        default: src/
     secrets:
       RELEASE_BOT_PRIVATE_KEY:
         description: Private key of the release GitHub App (not needed for dry_run)
@@ -69,6 +84,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      checks: read
     outputs:
       result: ${{ steps.finish.outputs.result }}
       tag: ${{ steps.trigger.outputs.tag }}
@@ -87,6 +103,7 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_EVENT: ${{ github.event.pull_request.number }}
           PR_INPUT: ${{ inputs.pr_number }}
           GH_TOKEN: ${{ github.token }}
@@ -106,17 +123,20 @@ jobs:
             MERGED=$(jq -r '.merged' <<<"$PR_JSON")
             HEAD_REPO=$(jq -r '.head.repo.full_name // ""' <<<"$PR_JSON")
             HEAD_REF=$(jq -r '.head.ref' <<<"$PR_JSON")
+            HEAD_SHA=$(jq -r '.head.sha // ""' <<<"$PR_JSON")
             BASE_REF=$(jq -r '.base.ref' <<<"$PR_JSON")
             MERGE_SHA=$(jq -r '.merge_commit_sha // ""' <<<"$PR_JSON")
           else
             [ "$EVENT_NAME" = "pull_request" ] && [ "$ACTION" = "closed" ] || { echo "::error::Expected a pull_request closed or workflow_dispatch event, got $EVENT_NAME/$ACTION"; exit 1; }
             PR_NUMBER="$PR_EVENT"
+            HEAD_SHA="$EVENT_HEAD_SHA"
           fi
           [ "$MERGED" = "true" ] || { echo "::error::The pull request was closed without merging"; exit 1; }
           [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ] || { echo "::error::Release PRs must come from this repository, not $HEAD_REPO"; exit 1; }
           [ "$BASE_REF" = "$DEFAULT_BRANCH" ] || { echo "::error::Base branch is $BASE_REF, expected $DEFAULT_BRANCH"; exit 1; }
           [[ "$HEAD_REF" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Head branch '$HEAD_REF' is not release/x.y.z"; exit 1; }
           [[ "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::No merge commit SHA on the event"; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::No PR head commit SHA on the event"; exit 1; }
 
           if [ "$DRY_RUN" != "true" ] && { [ -z "$CLIENT_ID" ] || [ -z "$APP_KEY" ]; }; then
             echo "::error::client_id and RELEASE_BOT_PRIVATE_KEY are required unless dry_run is true"
@@ -128,6 +148,7 @@ jobs:
             echo "version=$VERSION"
             echo "tag=v$VERSION"
             echo "sha=$MERGE_SHA"
+            echo "head_sha=$HEAD_SHA"
             echo "pr=$PR_NUMBER"
           } >> "$GITHUB_OUTPUT"
 
@@ -145,14 +166,40 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ steps.trigger.outputs.sha }}
+          # Full history: the staleness check diffs the PR's head commit against this one, and
+          # a shallow clone would make that comparison fail (or silently lie) instead of running it.
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify CI on the PR head commit
+        id: ci_gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.trigger.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          RUNS=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100" --jq '.check_runs')
+          COUNT=$(jq 'length' <<<"$RUNS")
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::No check runs found on the PR head commit ($HEAD_SHA); refusing to tag"
+            exit 1
+          fi
+          if ! jq -e 'all(.status == "completed" and (.conclusion | IN("success", "skipped", "neutral")))' <<<"$RUNS" >/dev/null; then
+            echo "::error::CI is not green on the PR head commit ($HEAD_SHA); refusing to tag. This is the backstop for the branch ruleset's admin bypass — a release PR must still pass CI to be released."
+            jq -r '.[] | "  \(.name): \(.status)/\(.conclusion // "-")"' <<<"$RUNS"
+            exit 1
+          fi
+          echo "CI green on $HEAD_SHA ($COUNT check runs)."
 
       - name: Verify the release commit
         id: verify
         env:
           VERSION: ${{ steps.trigger.outputs.version }}
           TAG: ${{ steps.trigger.outputs.tag }}
+          SHA: ${{ steps.trigger.outputs.sha }}
+          HEAD_SHA: ${{ steps.trigger.outputs.head_sha }}
           README: ${{ inputs.readme_path }}
+          SHIPPED: ${{ inputs.shipped_paths }}
         run: |
           set -euo pipefail
 
@@ -183,6 +230,26 @@ jobs:
           if [ -n "$HIGHEST" ] && [ "$(printf '%s\n%s\n' "$HIGHEST" "$VERSION" | sort -V | tail -1)" != "$VERSION" ]; then
             echo "::error::$VERSION is not higher than the latest tag v$HIGHEST; refusing to tag"
             exit 1
+          fi
+
+          # A squash/merge/rebase can land something else under $SHIPPED between the PR's head
+          # commit and its merge commit (another PR merged first, or a direct push): the tag
+          # would then ship changes the release PR's changelog never saw. git needs both commits
+          # locally to tell; fetch-depth 0 on checkout normally guarantees that, but a squash
+          # merge can leave the head commit unreachable once GitHub garbage-collects it, so fall
+          # back to fetching it directly and warn (never silently skip the check) if that fails.
+          if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$HEAD_SHA" 2>/dev/null || true
+          fi
+          if git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            # shellcheck disable=SC2086 # SHIPPED is a deliberately unquoted space-separated path list
+            if ! git diff --quiet "$HEAD_SHA" "$SHA" -- $SHIPPED; then
+              echo "::error::Changes under '$SHIPPED' landed on the default branch between the release PR's head commit ($HEAD_SHA) and its merge commit ($SHA). The tag would ship changes the changelog never saw. Re-run prepare-release to fold them into a new release PR, then merge that one instead."
+              git diff --stat "$HEAD_SHA" "$SHA" -- $SHIPPED
+              exit 1
+            fi
+          else
+            echo "::warning::Could not fetch the PR head commit ($HEAD_SHA) to check for changes merged after it; proceeding without that check."
           fi
 
           echo "skip=false" >> "$GITHUB_OUTPUT"

@@ -33,9 +33,12 @@ concurrency:
   group: cut-release
   cancel-in-progress: false
 
+# checks: read lets the shared workflow verify CI passed on the release PR's head commit before
+# tagging — the backstop for a merge that bypassed the required-status-checks ruleset.
 permissions:
   contents: read
   pull-requests: read
+  checks: read
 
 jobs:
   cut:
@@ -51,5 +54,6 @@ jobs:
       # pull_request events have no inputs, so this is false (live) on merge and true (dry) by default on manual runs
       dry_run: ${{ inputs.dry_run == true }}
       # readme_path: 'src/wordpress-plugin/readme.txt'
+      # shipped_paths: 'src/'
     secrets:
       RELEASE_BOT_PRIVATE_KEY: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
