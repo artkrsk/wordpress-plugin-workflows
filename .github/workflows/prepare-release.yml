@@ -405,6 +405,7 @@ jobs:
           git tag -d "v$NEW"
 
       - name: Summarize
+        id: summarize
         if: steps.stamp.outcome == 'success'
         env:
           NEW: ${{ steps.gate.outputs.new_version }}
@@ -414,34 +415,45 @@ jobs:
         run: |
           set -euo pipefail
           BODY="$RUNNER_TEMP/pr-body.md"
+          SUMMARY="$RUNNER_TEMP/release-summary.md"
+
+          # Claude's summary: "Bump: <patch|minor> - <reason>" then "Flags: <none | bullets>".
+          BUMP=""; REASON=""; FLAGS=""
+          if [ -f "$SUMMARY" ]; then
+            BUMP_LINE=$(grep -m1 '^Bump:' "$SUMMARY" || true)
+            if [ -n "$BUMP_LINE" ]; then
+              BUMP=$(sed -E 's/^Bump:[[:space:]]*([A-Za-z]+).*/\1/' <<<"$BUMP_LINE" | tr '[:upper:]' '[:lower:]')
+              REASON=$(sed -E 's/^Bump:[[:space:]]*[A-Za-z]+[[:space:]]*[-:–—]*[[:space:]]*//' <<<"$BUMP_LINE")
+            fi
+            FLAGS=$(awk '/^Flags:/{f=1; sub(/^Flags:[ \t]*/,""); print; next} f{print}' "$SUMMARY" | sed '/^[[:space:]]*$/d')
+            if [ "$(tr '[:upper:]' '[:lower:]' <<<"$FLAGS" | tr -d '[:space:].')" = "none" ]; then FLAGS=""; fi
+          fi
+
+          # shellcheck disable=SC2086
+          COMMITS=$(git log --no-merges --format='- %h %s' "$LAST_TAG..$BASE_SHA" -- $SHIPPED)
+          COUNT=$(grep -c . <<<"$COMMITS" || true)
+
           {
-            echo "## Release $NEW"
+            if [ -n "$BUMP" ]; then echo "## Release $NEW · $BUMP"; else echo "## Release $NEW"; fi
             echo
-            if [ -f "$RUNNER_TEMP/release-summary.md" ]; then cat "$RUNNER_TEMP/release-summary.md"; echo; fi
-            echo "### Changelog entry"
+            if [ -n "$REASON" ]; then echo "_${REASON}_"; echo; fi
+            if [ -n "$FLAGS" ]; then
+              echo "> [!WARNING]"
+              echo "> **Flags**"
+              # shellcheck disable=SC2001
+              sed 's/^/> /' <<<"$FLAGS"
+              echo
+            fi
+            echo "### Changelog"
             echo
-            echo '```'
-            cat "$RUNNER_TEMP/entry.txt"
-            echo '```'
+            # entry.txt was extracted before the version bump; its first line is the "= x.y.z =" heading.
+            tail -n +2 "$RUNNER_TEMP/entry.txt" | sed -E 's/^\* ([a-z]+): /* **\1:** /'
             echo
-            echo "### Commits since $LAST_TAG touching \`$SHIPPED\`"
+            echo "<details><summary>Commits since $LAST_TAG ($COUNT)</summary>"
             echo
-            # shellcheck disable=SC2086
-            git log --no-merges --format='- %h %s' "$LAST_TAG..$BASE_SHA" -- $SHIPPED
+            echo "$COMMITS"
             echo
-            echo "### Files changed by this PR"
-            echo
-            echo '```'
-            git diff --stat "$BASE_SHA"..HEAD
-            echo '```'
-            echo
-            echo "### After merging"
-            echo
-            echo "Merging deploys nothing. A squash merge changes the commit SHA, so tag the merge commit on the default branch, then push the tag to start the release workflow:"
-            echo
-            echo '```'
-            echo "git checkout main && git pull && git tag v$NEW && git push origin v$NEW"
-            echo '```'
+            echo "</details>"
           } > "$BODY"
           tee -a "$GITHUB_STEP_SUMMARY" < "$BODY"
 
