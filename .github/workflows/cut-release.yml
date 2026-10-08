@@ -179,10 +179,14 @@ jobs:
         run: |
           set -euo pipefail
           # This job is itself triggered by `pull_request`, so GitHub lists its OWN run as a
-          # check-run on this exact head commit, perpetually "in_progress" while we're inside it.
-          # Left in, the gate would refuse every normal merge, forever. Filter it out by run ID.
+          # check-run on this exact head commit ("cut / Tag merged release", from this job's own
+          # id + name below — stable regardless of caller). Filtering by this run's ID isn't
+          # enough: a prior FAILED attempt (e.g. this same bug before it was fixed) leaves a
+          # permanent check-run record on the commit that a later workflow_dispatch retry doesn't
+          # supersede, so the gate would refuse forever even after the real checks go green.
+          # Exclude every "cut / Tag merged release" entry by name, not just this run's.
           RUNS=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100" \
-            --jq "[.check_runs[] | select(.html_url | contains(\"/runs/$GITHUB_RUN_ID/\") | not)]")
+            --jq '[.check_runs[] | select(.name != "cut / Tag merged release")]')
           COUNT=$(jq 'length' <<<"$RUNS")
           if [ "$COUNT" -eq 0 ]; then
             echo "::error::No check runs found on the PR head commit ($HEAD_SHA); refusing to tag"
