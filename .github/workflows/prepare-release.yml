@@ -32,6 +32,11 @@ on:
         required: false
         type: boolean
         default: false
+      reviewers:
+        description: GitHub users to request a review from on the release PR (comma-separated). A review request always notifies them, whatever their watch settings. Empty = none. A failed request only warns.
+        required: false
+        type: string
+        default: ''
       runner:
         description: Runner label
         required: false
@@ -475,6 +480,7 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           NEW: ${{ steps.gate.outputs.new_version }}
           BASE: ${{ steps.detect.outputs.default_branch }}
+          REVIEWERS: ${{ inputs.reviewers }}
         run: |
           set -euo pipefail
           # Token goes on the command line only for this push (persist-credentials is off).
@@ -484,6 +490,13 @@ jobs:
             --title "Release ${NEW}" --body-file "$RUNNER_TEMP/pr-body.md")
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "Opened $URL"
+
+          # The PR matters more than the ping: a failed review request (unknown user, no access)
+          # only warns.
+          if [ -n "$REVIEWERS" ]; then
+            gh pr edit "$URL" --repo "$GITHUB_REPOSITORY" --add-reviewer "$REVIEWERS" \
+              || echo "::warning::Could not request a review from $REVIEWERS; the PR was opened anyway"
+          fi
 
       - name: Finish
         id: finish
