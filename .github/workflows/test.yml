@@ -118,6 +118,21 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Detect an un-initialized template repo
+        # wp-plugin-template's composer.json name stays "arts/__SLUG__" until
+        # `arts-wp init` fills it in — Composer rejects that outright, which
+        # would otherwise fail every PR on the template itself before it's
+        # ever used to create a real plugin.
+        id: pkg
+        run: |
+          NAME=$(grep -m1 '"name"' composer.json | sed -E 's/.*"name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')
+          if [[ -z "$NAME" || "$NAME" == *"__SLUG__"* ]]; then
+            echo "has_name=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::composer.json name is '$NAME' — still an un-initialized template (run arts-wp init). Skipping composer-dependent checks."
+          else
+            echo "has_name=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Node.js
         if: runner.environment == 'github-hosted'
         uses: actions/setup-node@v6
@@ -139,6 +154,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install Composer dependencies (runs Strauss via post-install hook)
+        if: steps.pkg.outputs.has_name == 'true'
         run: composer install --prefer-dist --no-progress
 
       - name: Biome
@@ -172,6 +188,7 @@ jobs:
           fail_ci_if_error: false
 
       - name: PHPStan
+        if: steps.pkg.outputs.has_name == 'true'
         run: |
           if [ -f phpstan.neon ]; then
             vendor/bin/phpstan analyse --memory-limit=1G --no-progress
@@ -180,6 +197,7 @@ jobs:
           fi
 
       - name: PHPCS
+        if: steps.pkg.outputs.has_name == 'true'
         run: |
           if [ -f phpcs.xml ]; then
             vendor/bin/phpcs
@@ -203,6 +221,7 @@ jobs:
         # never blanket-suppressed here. --ignore-unreachable: a Packagist
         # advisory-API outage (502s happen) must not fail CI; real advisories
         # still do.
+        if: steps.pkg.outputs.has_name == 'true'
         run: composer audit --locked --ignore-unreachable
 
       - name: Changelog grammar
@@ -221,6 +240,20 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Detect an un-initialized template repo
+        # Same check as the quality job: a build (and a Plugin Check scan)
+        # isn't meaningful on wp-plugin-template before `arts-wp init` gives
+        # it a real composer.json name.
+        id: pkg
+        run: |
+          NAME=$(grep -m1 '"name"' composer.json | sed -E 's/.*"name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')
+          if [[ -z "$NAME" || "$NAME" == *"__SLUG__"* ]]; then
+            echo "has_name=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::composer.json name is '$NAME' — still an un-initialized template (run arts-wp init). Skipping the build and Plugin Check scan."
+          else
+            echo "has_name=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Setup Node.js
         if: runner.environment == 'github-hosted'
@@ -243,12 +276,15 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install Composer dependencies (runs Strauss via post-install hook)
+        if: steps.pkg.outputs.has_name == 'true'
         run: composer install --prefer-dist --no-progress
 
       - name: Build plugin
+        if: steps.pkg.outputs.has_name == 'true'
         run: pnpm build
 
       - name: Validate ZIP size
+        if: steps.pkg.outputs.has_name == 'true'
         run: |
           SLUG=$(node -e "import('./project.config.js').then(m => console.log(m.default.slug))")
           ZIP_FILE="dist/${SLUG}.zip"
@@ -264,6 +300,7 @@ jobs:
           echo "SLUG=$SLUG" >> "$GITHUB_ENV"
 
       - name: Acquire cross-repo wp-env lock
+        if: steps.pkg.outputs.has_name == 'true'
         uses: artkrsk/wordpress-plugin-workflows/actions/wp-env-lock@main
         with:
           mode: acquire
@@ -272,6 +309,7 @@ jobs:
           project: ${{ env.SLUG }}
 
       - name: Run WordPress Plugin Check
+        if: steps.pkg.outputs.has_name == 'true'
         uses: wordpress/plugin-check-action@v1
         with:
           build-dir: ./dist/${{ env.SLUG }}
@@ -283,7 +321,7 @@ jobs:
             ${{ inputs.extra_plugin_check_ignore_codes }}
 
       - name: Release cross-repo wp-env lock
-        if: always()
+        if: always() && steps.pkg.outputs.has_name == 'true'
         uses: artkrsk/wordpress-plugin-workflows/actions/wp-env-lock@main
         with:
           mode: release
