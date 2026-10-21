@@ -225,7 +225,7 @@ jobs:
           # Failing here is the point: a release PR whose files disagree must never be tagged.
           COMP_V=$(node -p "require('./composer.json').version")
           STABLE_V=$(grep -m1 '^Stable tag:' "$README" | awk '{print $3}' | tr -d '\r')
-          TOP_V=$(awk '/^== Changelog ==/{f=1;next} f && /^= [0-9]+\.[0-9]+\.[0-9]+ =$/{gsub(/[= ]/,"");print;exit}' "$README")
+          TOP_V=$(awk '/^== Changelog ==/{f=1;next} f && /^== /{exit} f && /^= [0-9]+\.[0-9]+\.[0-9]+( .+)? =$/{print $2;exit}' "$README")
           for pair in "composer.json:$COMP_V" "readme.txt Stable tag:$STABLE_V" "readme.txt top changelog entry:$TOP_V"; do
             [ "${pair##*:}" = "$VERSION" ] || { echo "::error::${pair%%:*} is '${pair##*:}', expected $VERSION; refusing to tag"; exit 1; }
           done

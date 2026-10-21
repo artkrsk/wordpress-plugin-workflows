@@ -185,7 +185,7 @@ jobs:
           TAG_V="${LAST_TAG#v}"
 
           COMP_V=$(node -p "require('./composer.json').version")
-          README_V=$(awk '/^== Changelog ==/{f=1;next} f && /^= [0-9]+\.[0-9]+\.[0-9]+ =$/{gsub(/[= ]/,"");print;exit}' "$README")
+          README_V=$(awk '/^== Changelog ==/{f=1;next} f && /^== /{exit} f && /^= [0-9]+\.[0-9]+\.[0-9]+( .+)? =$/{print $2;exit}' "$README")
 
           {
             echo "last_tag=$LAST_TAG"
@@ -272,6 +272,7 @@ jobs:
                and, where a message is unclear, git diff ${{ steps.detect.outputs.last_tag }}..HEAD -- ${{ inputs.shipped_paths }}.
                Ignore dependency bumps, CI, tests, refactors, docs-only and internal renames, unless they
                change what site owners see or what developers integrating with the plugin can call.
+               Edits to existing changelog entries (their wording or dates) are not a user-visible change.
             2. Read the top three entries under "== Changelog ==" in ${{ inputs.readme_path }} and match their
                tone, length and level of detail. Readers on WordPress.org are mostly non-technical: describe
                the effect they will notice, not the implementation. No file names, class names or commit
@@ -281,6 +282,7 @@ jobs:
                  lowercase prefix, one sentence, ending with a period.
                - Group in that order: added, improved, fixed, security.
                - Heading is "= X.Y.Z =" directly under "== Changelog ==", above the previous top entry.
+                 No date, even though older headings carry one: the release step adds it.
             4. Version:
                - Mode draft with a version given: use exactly that version.
                - Mode draft with no version: infer how this repository bumps from the recent tags above
@@ -289,8 +291,8 @@ jobs:
                  public contract (README "Integration contract", CLAUDE.md "Frozen contracts") was broken,
                  write that under Flags in the summary and still use the smaller bump.
                - Mode verify: the maintainer already wrote the "= ${{ steps.detect.outputs.want_version }} =" entry.
-                 Keep its version and existing wording untouched. Only append bullets for user-visible
-                 changes it misses, in the right group. If it is complete, change nothing.
+                 Keep its version, any date on its heading, and existing wording untouched. Only append
+                 bullets for user-visible changes it misses, in the right group. If it is complete, change nothing.
             5. Run: pnpm exec arts-wp changelog validate --version <X.Y.Z>
                Fix the entry and re-run until it passes.
             6. If nothing user-visible changed since the tag, edit nothing and write one sentence saying why
@@ -350,9 +352,9 @@ jobs:
           git diff -- "$README"
           echo "::endgroup::"
 
-          NEW=$(awk '/^== Changelog ==/{f=1;next} f && /^= [0-9]+\.[0-9]+\.[0-9]+ =$/{gsub(/[= ]/,"");print;exit}' "$README")
+          NEW=$(awk '/^== Changelog ==/{f=1;next} f && /^== /{exit} f && /^= [0-9]+\.[0-9]+\.[0-9]+( .+)? =$/{print $2;exit}' "$README")
           if [ -z "$NEW" ]; then
-            echo "::error::No '= x.y.z =' entry found under == Changelog == in $README"
+            echo "::error::No '= x.y.z =' or '= x.y.z – Month D, YYYY =' entry found under == Changelog == in $README"
             exit 1
           fi
           if [ -n "$WANT" ] && [ "$NEW" != "$WANT" ]; then
