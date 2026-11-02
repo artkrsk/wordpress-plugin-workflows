@@ -32,8 +32,8 @@ on:
         required: false
         type: boolean
         default: false
-      reviewers:
-        description: GitHub users to request a review from on the release PR (comma-separated). A review request always notifies them, whatever their watch settings. Empty = none. A failed request only warns.
+      notify:
+        description: GitHub users to @mention in the release PR body (comma-separated). A mention always notifies them, whatever their watch settings, with one email (a review request sends a second one). Empty = none.
         required: false
         type: string
         default: ''
@@ -482,23 +482,24 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           NEW: ${{ steps.gate.outputs.new_version }}
           BASE: ${{ steps.detect.outputs.default_branch }}
-          REVIEWERS: ${{ inputs.reviewers }}
+          NOTIFY: ${{ inputs.notify }}
         run: |
           set -euo pipefail
           # Token goes on the command line only for this push (persist-credentials is off).
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             "HEAD:refs/heads/release/${NEW}"
+
+          # A mention in the creation body is one email; a review request is a second event, so a
+          # separate mail on top of the PR-opened one.
+          if [ -n "$NOTIFY" ]; then
+            printf '\ncc %s\n' "$(sed -E 's/[[:space:]]*,[[:space:]]*/ @/g; s/^[[:space:]]*/@/' <<<"$NOTIFY")" \
+              >> "$RUNNER_TEMP/pr-body.md"
+          fi
+
           URL=$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "release/${NEW}" \
             --title "Release ${NEW}" --body-file "$RUNNER_TEMP/pr-body.md")
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "Opened $URL"
-
-          # The PR matters more than the ping: a failed review request (unknown user, no access)
-          # only warns.
-          if [ -n "$REVIEWERS" ]; then
-            gh pr edit "$URL" --repo "$GITHUB_REPOSITORY" --add-reviewer "$REVIEWERS" \
-              || echo "::warning::Could not request a review from $REVIEWERS; the PR was opened anyway"
-          fi
 
       - name: Finish
         id: finish
