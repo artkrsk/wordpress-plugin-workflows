@@ -471,8 +471,14 @@ jobs:
           OPEN_PRS: ${{ steps.detect.outputs.open_prs }}
           NEW: ${{ steps.gate.outputs.new_version }}
         run: |
+          set -euo pipefail
+          # The remote branch goes through the API, never `gh pr close --delete-branch`: that also
+          # deletes a local branch of the same name, and the release commit sits on the local
+          # `release/$NEW` when the superseded PR had that version too, so the push below sent main.
           for n in $OPEN_PRS; do
-            gh pr close "$n" --delete-branch --comment "Superseded by the release PR for $NEW."
+            HEAD_REF=$(gh pr view "$n" --repo "$GITHUB_REPOSITORY" --json headRefName --jq .headRefName)
+            gh pr close "$n" --repo "$GITHUB_REPOSITORY" --comment "Superseded by the release PR for $NEW."
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$HEAD_REF"
           done
 
       - name: Push branch and open PR
