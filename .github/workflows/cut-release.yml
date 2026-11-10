@@ -160,7 +160,6 @@ jobs:
           client-id: ${{ inputs.client_id }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
           permission-contents: write
-          permission-pull-requests: write
 
       - name: Checkout merge commit
         uses: actions/checkout@v6
@@ -282,14 +281,11 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           TAG: ${{ steps.trigger.outputs.tag }}
           SHA: ${{ steps.trigger.outputs.sha }}
-          PR_NUMBER: ${{ steps.trigger.outputs.pr }}
         run: |
           set -euo pipefail
           # Lightweight tag, like `arts-wp release` makes. Created by the App, so its push
           # event starts the tag-triggered release workflow.
           gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" --jq '.ref'
-          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --body "Tagged \`$TAG\` at \`${SHA:0:7}\`. The release workflow should be starting: https://github.com/$GITHUB_REPOSITORY/actions/workflows/release.yml"
           {
             echo "## Cut release: tagged"
             echo
