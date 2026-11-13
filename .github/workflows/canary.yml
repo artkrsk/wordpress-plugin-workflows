@@ -12,7 +12,7 @@ on:
         description: Runner label
         required: false
         type: string
-        default: self-hosted
+        default: ubuntu-latest
       integration_suites:
         description: JSON array of PHPUnit configs ("" = default). Empty array = plugin-check canary only.
         required: false

@@ -10,7 +10,7 @@ on:
         description: Runner label for the heavy jobs
         required: false
         type: string
-        default: self-hosted
+        default: ubuntu-latest
       zip_budget_mb:
         description: Hard ceiling for the release zip, in MB (e.g. "0.25")
         required: true
