@@ -1,0 +1,44 @@
+name: WordPress Version Check
+
+# Opens an issue when the plugin's "Tested up to" falls behind WordPress, and
+# closes it once the readme catches up (actions/wp-version-check). The caller
+# owns the triggers (a weekday cron, workflow_dispatch) and must grant
+# `issues: write`.
+
+on:
+  workflow_call:
+    inputs:
+      readme_path:
+        description: Readme with the "Tested up to" line, read from the default branch
+        required: false
+        type: string
+        default: src/wordpress-plugin/readme.txt
+      channel:
+        description: stable, rc (also release candidates) or beta (also betas)
+        required: false
+        type: string
+        default: rc
+      assignees:
+        description: Comma-separated logins assigned to a new issue
+        required: false
+        type: string
+        default: ''
+      runner:
+        description: Runner label
+        required: false
+        type: string
+        default: ubuntu-latest
+
+permissions:
+  contents: read
+
+jobs:
+  wp-version-check:
+    name: WordPress version check
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: artkrsk/wordpress-plugin-workflows/actions/wp-version-check@main
+        with:
+          readme: ${{ inputs.readme_path }}
+          channel: ${{ inputs.channel }}
+          assignees: ${{ inputs.assignees }}
