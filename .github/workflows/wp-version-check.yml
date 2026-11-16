@@ -29,8 +29,11 @@ on:
         type: string
         default: ubuntu-latest
 
+# A called workflow keeps only what it declares here, within what the caller grants: the
+# issue writes need `issues: write` on both sides.
 permissions:
   contents: read
+  issues: write
 
 jobs:
   wp-version-check:
