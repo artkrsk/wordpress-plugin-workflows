@@ -1,0 +1,40 @@
+name: WordPress version check
+description: >
+  Compares the plugin readme's "Tested up to" with the current WordPress
+  versions from wordpress.org and keeps one `wpvc` issue in step: opened (or
+  retitled) while the plugin is behind, commented on and closed once it catches
+  up. Same rules, titles and texts as skaut/wordpress-version-checker v2.2.3,
+  which it replaces without a Node runtime (shell, curl, jq and gh only). The
+  readme is read from the default branch, so no checkout is needed.
+
+inputs:
+  readme:
+    description: Path of the readme with the "Tested up to" line
+    required: false
+    default: src/wordpress-plugin/readme.txt
+  channel:
+    description: >
+      stable (only released versions), rc (also release candidates) or beta
+      (also betas and release candidates)
+    required: false
+    default: rc
+  assignees:
+    description: Comma-separated logins assigned to a new issue
+    required: false
+    default: ''
+  token:
+    description: Token that may read the repository and write its issues
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check "Tested up to" against WordPress
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        README: ${{ inputs.readme }}
+        CHANNEL: ${{ inputs.channel }}
+        ASSIGNEES: ${{ inputs.assignees }}
+      run: bash "${{ github.action_path }}/wp-version-check.sh"
