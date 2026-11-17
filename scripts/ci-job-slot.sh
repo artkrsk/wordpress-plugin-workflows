@@ -20,6 +20,9 @@
 # Tuning (common.env; runners read it at service start, so restart them after a change):
 #   CI_JOB_SLOTS      concurrent jobs allowed on the host (default 3)
 #   CI_JOB_SLOT_WAIT  seconds to wait for a slot before failing the job (default 5400)
+#   CI_HEAVY_REPOS    space-separated owner/repo list whose jobs also hold the one `heavy` lock, so
+#                     two of them never run together: each peaks near 2 GB, and two of them plus the
+#                     idle listeners do not fit in ci.slice (2026-11-17: every runner went offline)
 # Watching: `ls /run/lock/ci-job-slot`, `pgrep -fa ci-job-slot`, `journalctl -t ci-job-slot`.
 # Hand test: CI_JOB_SLOT_WORKER_PID=<pid of a `sleep 600 &`> ./ci-job-slot.sh
 set -euo pipefail
@@ -82,18 +85,33 @@ try_slot() {
   return 1
 }
 
+need_heavy=0
+case " ${CI_HEAVY_REPOS:-} " in
+  *" ${GITHUB_REPOSITORY:-none} "*) need_heavy=1 ;;
+esac
+
 deadline=$((SECONDS + WAIT_SECONDS))
-announced=0
+announced=""
 while :; do
-  for i in $(seq 1 "$SLOTS"); do
-    if try_slot "$i"; then
-      log "holding slot $i/$SLOTS for worker $worker"
-      exit 0
-    fi
-  done
-  if [ "$announced" = 0 ]; then
-    log "all $SLOTS host slots busy - waiting (up to ${WAIT_SECONDS}s)"
-    announced=1
+  # The heavy lock comes first, so a job waiting for it does not keep a numbered slot from a light job.
+  if [ "$need_heavy" = 1 ] && try_slot heavy; then
+    log "holding the heavy slot for worker $worker"
+    need_heavy=0
+  fi
+  if [ "$need_heavy" = 1 ]; then
+    waiting="another heavy job is running"
+  else
+    for i in $(seq 1 "$SLOTS"); do
+      if try_slot "$i"; then
+        log "holding slot $i/$SLOTS for worker $worker"
+        exit 0
+      fi
+    done
+    waiting="all $SLOTS host slots busy"
+  fi
+  if [ "$announced" != "$waiting" ]; then
+    log "$waiting - waiting (up to ${WAIT_SECONDS}s)"
+    announced=$waiting
   fi
   if [ "$SECONDS" -ge "$deadline" ]; then
     log "no host slot after ${WAIT_SECONDS}s - failing the job instead of overloading the host"
