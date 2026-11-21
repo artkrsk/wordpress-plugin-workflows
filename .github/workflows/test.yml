@@ -299,6 +299,13 @@ jobs:
           echo "ZIP size: ${SIZE_MB} MB"
           echo "SLUG=$SLUG" >> "$GITHUB_ENV"
 
+      # A pull request that changes "Tested up to" runs Plugin Check on that WordPress
+      # (an override beats the `latest` below) and gets the smoke run after it.
+      - name: WordPress under test
+        id: wp
+        if: steps.pkg.outputs.has_name == 'true'
+        uses: artkrsk/wordpress-plugin-workflows/actions/wordpress-under-test@main
+
       - name: Acquire cross-repo wp-env lock
         if: steps.pkg.outputs.has_name == 'true'
         uses: artkrsk/wordpress-plugin-workflows/actions/wp-env-lock@main
@@ -319,6 +326,13 @@ jobs:
           ignore-codes: |
             WordPress.NamingConventions.PrefixAllGlobals.InvalidPrefixPassed
             ${{ inputs.extra_plugin_check_ignore_codes }}
+
+      # In the wp-env plugin-check-action leaves running
+      - name: Smoke run on the WordPress under test
+        if: steps.pkg.outputs.has_name == 'true' && steps.wp.outputs.version != ''
+        uses: artkrsk/wordpress-plugin-workflows/actions/wordpress-smoke@main
+        with:
+          slug: ${{ env.SLUG }}
 
       - name: Release cross-repo wp-env lock
         if: always() && steps.pkg.outputs.has_name == 'true'
@@ -391,6 +405,11 @@ jobs:
       - name: Install Playwright system dependencies
         if: inputs.run_e2e && runner.environment == 'github-hosted'
         run: pnpm exec playwright install-deps ${{ inputs.playwright_browsers }}
+
+      # A pull request that changes "Tested up to" runs the suites on that WordPress
+      # instead of the core .wp-env.json pins.
+      - name: WordPress under test
+        uses: artkrsk/wordpress-plugin-workflows/actions/wordpress-under-test@main
 
       - name: Start wp-env
         run: pnpm exec wp-env start
