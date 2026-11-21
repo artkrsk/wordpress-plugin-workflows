@@ -1,32 +1,26 @@
 #!/bin/bash
-# For a pull request that changes the plugin's "Tested up to" (composer.json, the `wordpress` block): writes
-# .wp-env.override.json so the job's wp-env runs the newest build of the declared WordPress version, and
-# prints version=<that build> on stdout. Any other event or pull request prints and writes nothing.
+# Points the job's wp-env at the newest build of the WordPress version the plugin declares as "Tested up to"
+# (composer.json, the `wordpress` block): writes .wp-env.override.json, which beats the core .wp-env.json
+# names, and prints version=<that build> on stdout. A release candidate is that build from the day the
+# value is raised to it, the latest patch release after that. A composer.json that declares nothing prints
+# and writes nothing.
 #
-# Env: GH_TOKEN, GITHUB_REPOSITORY, GITHUB_EVENT_NAME, GITHUB_EVENT_PATH. Run from the repository root.
+# Run from the repository root.
 set -euo pipefail
 
-[[ ${GITHUB_EVENT_NAME:-} == pull_request ]] || exit 0
-
-tested_up_to() {
-  jq -r '.wordpress["Tested up to"] // empty'
-}
-
-base_sha=$(jq -r '.pull_request.base.sha' "$GITHUB_EVENT_PATH")
-head=$(tested_up_to <composer.json)
-base=$(gh api -H 'Accept: application/vnd.github.raw' "repos/$GITHUB_REPOSITORY/contents/composer.json?ref=$base_sha" | tested_up_to)
-if [[ -z $head || $head == "$base" ]]; then
+tested=$(jq -r '.wordpress["Tested up to"] // empty' composer.json)
+if [[ -z $tested ]]; then
   exit 0
 fi
 
-versions=$(BRANCH=$head bash "$(dirname "$0")/../wordpress-version/wordpress-version.sh")
+versions=$(BRANCH=$tested bash "$(dirname "$0")/../wordpress-version/wordpress-version.sh")
 build=$(sed -n 's/^build=//p' <<<"$versions")
 zip=$(sed -n 's/^zip=//p' <<<"$versions")
 if [[ -z $build ]]; then
-  echo "::error::composer.json declares \"Tested up to\": \"$head\", and wordpress.org offers no $head build" >&2
+  echo "::error::composer.json declares \"Tested up to\": \"$tested\", and wordpress.org offers no $tested build" >&2
   exit 1
 fi
 
 jq -n --arg core "$zip" '{core: $core}' >.wp-env.override.json
-echo "::notice::\"Tested up to\" moves from ${base:-nothing} to $head: this job runs on WordPress $build" >&2
+echo "::notice::\"Tested up to\" is $tested: this job runs on WordPress $build" >&2
 echo "version=$build"

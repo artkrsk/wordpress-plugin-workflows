@@ -21,7 +21,7 @@ page=$(wp-env run cli -- bash -c '
   wp config set WP_DEBUG_LOG true --raw >&2
   wp config set WP_DEBUG_DISPLAY false --raw >&2
   rm -f wp-content/debug.log
-  wp plugin is-active "$0" >&2
+  wp plugin is-active "$0" || { echo "::error::$0 is not active in this wp-env" >&2; exit 1; }
   wp post create --post_type=page --post_status=publish --post_title="Smoke run" --porcelain
 ' "$SLUG" | tr -dc '0-9')
 version=$(wp-env run cli -- wp core version 2>/dev/null | tr -d '[:space:]')

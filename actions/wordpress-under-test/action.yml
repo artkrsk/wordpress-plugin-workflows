@@ -1,21 +1,14 @@
 name: WordPress under test
 description: >
-  For a pull request that changes the plugin's "Tested up to" (composer.json,
-  the `wordpress` block): points the job's wp-env at the newest build of the
-  declared WordPress version through `.wp-env.override.json`, so the pull
-  request that makes the claim is the one that proves it. Run it from the
-  repository root before wp-env starts. Any other event or pull request
-  writes nothing and leaves `version` empty.
-
-inputs:
-  token:
-    description: Token that may read the repository
-    required: false
-    default: ${{ github.token }}
+  Points the job's wp-env at the newest build of the WordPress version the
+  plugin declares as "Tested up to" (composer.json, the `wordpress` block)
+  through `.wp-env.override.json`, so CI tests what the plugin claims: a
+  release candidate from the day the value is raised to it, the latest patch
+  release after that. Run it from the repository root before wp-env starts.
 
 outputs:
   version:
-    description: The WordPress build the job runs on, e.g. 7.2-RC2 (empty when "Tested up to" did not change)
+    description: The WordPress build the job runs on, e.g. 7.2-RC2 (empty when composer.json declares no "Tested up to")
     value: ${{ steps.resolve.outputs.version }}
 
 runs:
@@ -24,6 +17,4 @@ runs:
     - name: Resolve the WordPress version under test
       id: resolve
       shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.token }}
       run: bash "${{ github.action_path }}/wordpress-under-test.sh" >> "$GITHUB_OUTPUT"
