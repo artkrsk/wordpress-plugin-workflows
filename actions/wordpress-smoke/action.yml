@@ -1,0 +1,22 @@
+name: WordPress smoke run
+description: >
+  Loads the plugin in the wp-env the job already started (plugin-check-action
+  leaves its own running, with the plugin and its required plugins active):
+  the front end, the dashboard, the Plugins screen and, with Elementor, the
+  editor must answer 200, and debug.log may hold no PHP error from the
+  plugin's files. The runtime half of a "Tested up to" claim for a plugin
+  that has no test suite of its own.
+
+inputs:
+  slug:
+    description: The plugin's slug (its folder under wp-content/plugins)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Smoke run
+      shell: bash
+      env:
+        SLUG: ${{ inputs.slug }}
+      run: bash "${{ github.action_path }}/wordpress-smoke.sh"
