@@ -299,6 +299,13 @@ jobs:
           echo "ZIP size: ${SIZE_MB} MB"
           echo "SLUG=$SLUG" >> "$GITHUB_ENV"
 
+      # Plugin Check and the smoke run after it use the newest build of the WordPress the
+      # plugin declares as "Tested up to" (an override beats the `latest` below): a release
+      # candidate from the day the value is raised to it, so the claim is tested on every run.
+      - name: WordPress under test
+        if: steps.pkg.outputs.has_name == 'true'
+        uses: artkrsk/wordpress-plugin-workflows/actions/wordpress-under-test@main
+
       - name: Acquire cross-repo wp-env lock
         if: steps.pkg.outputs.has_name == 'true'
         uses: artkrsk/wordpress-plugin-workflows/actions/wp-env-lock@main
@@ -319,6 +326,14 @@ jobs:
           ignore-codes: |
             WordPress.NamingConventions.PrefixAllGlobals.InvalidPrefixPassed
             ${{ inputs.extra_plugin_check_ignore_codes }}
+
+      # In the wp-env plugin-check-action leaves running: the runtime check of a plugin
+      # that has no suite of its own
+      - name: Smoke run
+        if: steps.pkg.outputs.has_name == 'true'
+        uses: artkrsk/wordpress-plugin-workflows/actions/wordpress-smoke@main
+        with:
+          slug: ${{ env.SLUG }}
 
       - name: Release cross-repo wp-env lock
         if: always() && steps.pkg.outputs.has_name == 'true'
@@ -391,6 +406,11 @@ jobs:
       - name: Install Playwright system dependencies
         if: inputs.run_e2e && runner.environment == 'github-hosted'
         run: pnpm exec playwright install-deps ${{ inputs.playwright_browsers }}
+
+      # The suites run on the WordPress the plugin declares as "Tested up to", whatever
+      # core .wp-env.json names for local runs.
+      - name: WordPress under test
+        uses: artkrsk/wordpress-plugin-workflows/actions/wordpress-under-test@main
 
       - name: Start wp-env
         run: pnpm exec wp-env start
