@@ -1,0 +1,30 @@
+name: WordPress release notes
+description: >
+  Saves a WordPress release's Field Guide and developer notes from
+  make.wordpress.org/core as text files with an INDEX.md, for a reviewer
+  (Claude in prepare-release) to read against the plugin's code. Python 3
+  standard library only.
+
+inputs:
+  version:
+    description: The release's major.minor, e.g. 7.2
+    required: true
+  directory:
+    description: Where the files go
+    required: true
+
+outputs:
+  count:
+    description: Documents saved (0 while the release has no Field Guide and no developer notes yet)
+    value: ${{ steps.fetch.outputs.count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch the Field Guide and developer notes
+      id: fetch
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        DIRECTORY: ${{ inputs.directory }}
+      run: python3 "${{ github.action_path }}/wordpress-notes.py" "$VERSION" "$DIRECTORY" >> "$GITHUB_OUTPUT"

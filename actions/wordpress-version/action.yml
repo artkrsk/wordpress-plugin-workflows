@@ -1,0 +1,41 @@
+name: WordPress version
+description: >
+  Names the WordPress versions a plugin's "Tested up to" is measured against,
+  from wordpress.org's version check: the latest stable major.minor, the one
+  to declare (the release candidate's while one is out) and the newest build
+  of a branch with its ZIP. Shell, curl and jq only.
+
+inputs:
+  channel:
+    description: rc (a release candidate is the version to declare) or stable (only released versions)
+    required: false
+    default: rc
+  branch:
+    description: major.minor whose newest build to name (empty = the version to declare)
+    required: false
+    default: ''
+
+outputs:
+  stable:
+    description: major.minor of the latest stable release, e.g. 7.1
+    value: ${{ steps.versions.outputs.stable }}
+  newest:
+    description: major.minor "Tested up to" should name, e.g. 7.2 while 7.2 is a release candidate
+    value: ${{ steps.versions.outputs.newest }}
+  build:
+    description: Newest build of the branch, e.g. 7.2-RC2 or 7.1.5 (empty when wordpress.org offers none)
+    value: ${{ steps.versions.outputs.build }}
+  zip:
+    description: ZIP of that build
+    value: ${{ steps.versions.outputs.zip }}
+
+runs:
+  using: composite
+  steps:
+    - name: Ask wordpress.org
+      id: versions
+      shell: bash
+      env:
+        CHANNEL: ${{ inputs.channel }}
+        BRANCH: ${{ inputs.branch }}
+      run: bash "${{ github.action_path }}/wordpress-version.sh" >> "$GITHUB_OUTPUT"
