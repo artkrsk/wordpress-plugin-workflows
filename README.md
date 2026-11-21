@@ -4,7 +4,7 @@ Reusable GitHub Actions workflows for Arts WordPress plugins — the shared CI/C
 
 | Workflow | What |
 |---|---|
-| `test.yml` | CI: quality (Biome, stylelint, tsc, Vitest+Codecov, PHPStan, PHPCS, knip, fallow-advisory, composer audit, changelog grammar, blueprint staleness), plugin-check (zip budget + wp.org Plugin Check), integration (wp-env PHPUnit against the built dist/). A pull request that changes composer.json's "Tested up to" runs Plugin Check and the suites on the newest build of that WordPress instead (a release candidate included) and adds a smoke run of the plugin (`actions/wordpress-under-test`, `actions/wordpress-smoke`) |
+| `test.yml` | CI: quality (Biome, stylelint, tsc, Vitest+Codecov, PHPStan, PHPCS, knip, fallow-advisory, composer audit, changelog grammar, blueprint staleness), plugin-check (zip budget + wp.org Plugin Check), integration (wp-env PHPUnit against the built dist/). Whatever starts WordPress there runs the newest build of the version composer.json declares as "Tested up to" (a release candidate from the day the value is raised to it), not the core `.wp-env.json` names, and Plugin Check is followed by a smoke run of the plugin (`actions/wordpress-under-test`, `actions/wordpress-smoke`) |
 | `release.yml` | Tag-triggered release: version consistency, changelog validation (`use_arts_changelog`), GitHub Release, wp.org SVN deploy with a duplicate-tag guard (`allow_retag`) |
 | `deploy-assets.yml` | wp.org listing assets (banners/icons/screenshots/blueprint) to SVN `assets/`, decoupled from releases; `dry_run` input |
 | `deploy-docs.yml` | VitePress docs → GitHub Pages (triggers stay in the caller) |

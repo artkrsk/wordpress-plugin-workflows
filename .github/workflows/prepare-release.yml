@@ -15,7 +15,7 @@ name: Prepare Release
 # release raises it in composer.json, with nothing else to ship as a patch release of its own:
 # the entry gains a compatibility line, Claude reads the release's Field Guide and developer notes
 # against the plugin's code and reports risks under Flags, and the PR's own checks run on that
-# WordPress (test.yml, actions/wordpress-under-test).
+# WordPress, as every run of test.yml does for the declared version (actions/wordpress-under-test).
 #
 # The caller owns triggers, concurrency (cancel-in-progress: false) and permissions.
 # dry_run needs only CLAUDE_CODE_OAUTH_TOKEN: it stops after stamping and prints the
@@ -355,6 +355,7 @@ jobs:
                the plugin does not meet, and change no code.
             8. Write a short pull request summary to ${{ runner.temp }}/release-summary.md in exactly this shape:
                Bump: <patch|minor> - <one-line reason>
+               WordPress: <the notes you read in step 7, by title, comma-separated; leave the line out without a WordPress version>
                Flags: <bullets, or "none">
 
       # The action hides the transcript (public repos). This prints only what is needed to
@@ -506,9 +507,11 @@ jobs:
           BODY="$RUNNER_TEMP/pr-body.md"
           SUMMARY="$RUNNER_TEMP/release-summary.md"
 
-          # Claude's summary: "Bump: <patch|minor> - <reason>" then "Flags: <none | bullets>".
-          BUMP=""; REASON=""; FLAGS=""
+          # Claude's summary: "Bump: <patch|minor> - <reason>", "WordPress: <notes read>" with a
+          # WordPress review, then "Flags: <none | bullets>".
+          BUMP=""; REASON=""; FLAGS=""; WP_READ=""
           if [ -f "$SUMMARY" ]; then
+            WP_READ=$(sed -n -E 's/^WordPress:[[:space:]]*//p' "$SUMMARY" | head -n 1)
             BUMP_LINE=$(grep -m1 '^Bump:' "$SUMMARY" || true)
             if [ -n "$BUMP_LINE" ]; then
               BUMP=$(sed -E 's/^Bump:[[:space:]]*([A-Za-z]+).*/\1/' <<<"$BUMP_LINE" | tr '[:upper:]' '[:lower:]')
@@ -537,12 +540,13 @@ jobs:
               echo "### WordPress $WP_BUMP"
               echo
               if [ "$WP_BUMP" != "$WP_DECLARED" ]; then
-                echo "Raises \"Tested up to\" from $WP_RELEASED to $WP_BUMP. The checks of this pull request run on the newest WordPress $WP_BUMP build: Plugin Check, a smoke run, and the integration suites where the repository has them."
+                echo "Raises \"Tested up to\" from $WP_RELEASED to $WP_BUMP."
               else
                 echo "Ships \"Tested up to\" $WP_BUMP, which composer.json already declares (the last release shipped $WP_RELEASED)."
               fi
+              echo "The checks of this pull request run on the newest WordPress $WP_BUMP build: Plugin Check, a smoke run, and the integration suites where the repository has them."
               if [ "${WP_NOTES:-0}" -gt 0 ]; then
-                echo "Claude read the release's Field Guide and developer notes ($WP_NOTES documents) against the plugin's code. A risk it found is under Flags; no Flags block means it found none."
+                echo "Claude had the release's Field Guide and developer notes ($WP_NOTES documents) to hold against the plugin's code and read: ${WP_READ:-it did not say which}. A risk it found is under Flags; no Flags block means it found none."
               else
                 echo "The Field Guide and developer notes of WordPress $WP_BUMP were not available (not published yet, or the fetch failed), so nothing was reviewed."
               fi
