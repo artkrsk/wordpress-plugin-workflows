@@ -1,14 +1,16 @@
-name: Deploy Assets to WordPress.org
+name: Deploy listing to WordPress.org
 
-# Listing assets (banners, icons, screenshots, the Playground blueprint) live in
-# SVN assets/, outside the plugin ZIP — changing one has nothing to do with a
-# plugin version. release.yml only fires on a v* tag, which would otherwise
-# force a fake version bump to publish a new screenshot. This deploys
-# .wordpress-org/ on its own.
+# The listing is the plugin page: assets (banners, icons, screenshots, the
+# Playground blueprint) in SVN assets/, and the text, which wp.org reads from
+# the readme.txt of the stable tag. Neither needs a new plugin version, and
+# release.yml only fires on a v* tag, which would otherwise force a fake
+# version bump to publish a new screenshot or a readme edit.
 #
-# Touches assets/ ONLY. trunk/ and tags/ stay at depth-empty in the working
-# copy and are never a commit target. release.yml keeps syncing the same
-# directory on real releases, so the two paths agree.
+# Touches assets/, trunk/readme.txt and tags/<stable>/readme.txt ONLY. The rest
+# of trunk/ and tags/ stays at depth-empty in the working copy. The readme is
+# refused when it describes another version than the live one (a raised Stable
+# tag, an undated changelog entry): that text ships with its release.
+# release.yml keeps syncing the same files on real releases, so the paths agree.
 
 on:
   workflow_call:
@@ -32,6 +34,16 @@ on:
         required: false
         type: string
         default: pnpm exec arts-wp blueprint check
+      readme:
+        description: Also deploy the readme to trunk and the stable tag
+        required: false
+        type: boolean
+        default: true
+      readme_path:
+        description: The readme.txt that ships in the plugin ZIP
+        required: false
+        type: string
+        default: src/wordpress-plugin/readme.txt
     secrets:
       SVN_USERNAME:
         required: true
@@ -43,7 +55,7 @@ permissions:
 
 jobs:
   deploy-assets:
-    name: Sync .wordpress-org to SVN assets
+    name: Sync the listing to SVN
     runs-on: ubuntu-latest
     environment:
       name: wordpress-org
@@ -95,6 +107,65 @@ jobs:
           # at the working-copy root, so assets/ holds no metadata to clobber.
           rsync -a --delete --exclude='.*' .wordpress-org/ /tmp/svn/assets/
 
+      # wp.org reads the Stable tag from trunk/readme.txt and then shows the page
+      # from tags/<stable>/readme.txt, so both get the same file.
+      - name: Readme into trunk and the stable tag
+        if: inputs.readme
+        env:
+          README: ${{ inputs.readme_path }}
+          SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          svn_up() {
+            svn update --non-interactive --trust-server-cert \
+              --username="$SVN_USERNAME" --password="$SVN_PASSWORD" "$@"
+          }
+          stable_tag() { grep -m1 '^Stable tag:' "$1" | awk '{print $3}' | tr -d '\r'; }
+
+          SRC="$GITHUB_WORKSPACE/$README"
+          if [ ! -f "$SRC" ]; then
+            echo "::error::$README not found"
+            exit 1
+          fi
+          VERSION=$(stable_tag "$SRC")
+          if [ -z "$VERSION" ]; then
+            echo "::error::$README has no Stable tag"
+            exit 1
+          fi
+
+          cd /tmp/svn
+          svn_up -q trunk/readme.txt
+          if [ ! -f trunk/readme.txt ]; then
+            echo "::error::trunk/readme.txt is missing on WordPress.org"
+            exit 1
+          fi
+          LIVE=$(stable_tag trunk/readme.txt)
+          if [ "$VERSION" != "$LIVE" ]; then
+            echo "::error::$README has Stable tag $VERSION but WordPress.org is on $LIVE. That readme ships with its release."
+            exit 1
+          fi
+
+          svn_up -q --set-depth empty "tags/$VERSION"
+          svn_up -q "tags/$VERSION/readme.txt"
+          if [ ! -f "tags/$VERSION/readme.txt" ]; then
+            echo "::error::tags/$VERSION/readme.txt is missing on WordPress.org"
+            exit 1
+          fi
+
+          # The newest changelog entry must be the live version, dated by the
+          # release; an undated one is still waiting for its release.
+          TOP=$(awk '/^== Changelog ==/{f=1;next} f && /^== /{exit} f && /^= /{print;exit}' "$SRC" | tr -d '\r')
+          if [[ "$TOP" != "= $VERSION – "*" =" ]]; then
+            echo "::error::The newest changelog entry in $README is '$TOP', not the dated $VERSION entry. That readme ships with its release."
+            exit 1
+          fi
+
+          cp "$SRC" trunk/readme.txt
+          cp "$SRC" "tags/$VERSION/readme.txt"
+          echo "README_TARGETS=trunk/readme.txt tags/$VERSION/readme.txt" >> "$GITHUB_ENV"
+
       - name: Stage and show the diff
         run: |
           cd /tmp/svn
@@ -102,7 +173,12 @@ jobs:
           svn status assets | grep '^!' | sed 's/! *//' | xargs -r -I% svn rm %@ 2>/dev/null || true
 
           echo "── pending changes ─────────────────────────────"
-          svn status assets
+          # shellcheck disable=SC2086 # README_TARGETS is a space-separated path list
+          svn status assets ${README_TARGETS:-}
+          if [ -n "${README_TARGETS:-}" ]; then
+            # shellcheck disable=SC2086
+            svn diff ${README_TARGETS}
+          fi
           echo "────────────────────────────────────────────────"
 
       - name: Commit to WordPress.org
@@ -110,15 +186,17 @@ jobs:
         run: |
           cd /tmp/svn
 
-          if [ -z "$(svn status assets)" ]; then
-            echo "Nothing to deploy — assets already match."
+          # shellcheck disable=SC2086 # README_TARGETS is a space-separated path list
+          if [ -z "$(svn status assets ${README_TARGETS:-})" ]; then
+            echo "Nothing to deploy — the listing already matches."
             exit 0
           fi
 
-          svn commit assets --non-interactive --trust-server-cert \
+          # shellcheck disable=SC2086
+          svn commit assets ${README_TARGETS:-} --non-interactive --trust-server-cert \
             --username="${{ secrets.SVN_USERNAME }}" \
             --password="${{ secrets.SVN_PASSWORD }}" \
-            -m "Update listing assets (${GITHUB_SHA:0:7})"
+            -m "Update listing (${GITHUB_SHA:0:7})"
 
           echo "Deployed. The listing and ps.w.org CDN may lag a few minutes."
 

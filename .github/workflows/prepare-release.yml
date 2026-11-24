@@ -247,9 +247,10 @@ jobs:
             WANT="$README_V"
           else
             WANT=""
+            # The readme is left out: deploy-assets.yml publishes a readme edit without a release.
             # shellcheck disable=SC2086
-            if [ -z "$WP_BUMP" ] && git diff --quiet "$LAST_TAG" HEAD -- $SHIPPED; then
-              skip "No changes under \`$SHIPPED\` since $LAST_TAG (dependency and CI churn does not trigger a release), and \"Tested up to\" is current."
+            if [ -z "$WP_BUMP" ] && git diff --quiet "$LAST_TAG" HEAD -- $SHIPPED ":(exclude)$README"; then
+              skip "No changes under \`$SHIPPED\` since $LAST_TAG (dependency, CI and readme-only churn does not trigger a release), and \"Tested up to\" is current."
             fi
             MODE=draft
           fi
