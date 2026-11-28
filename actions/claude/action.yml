@@ -1,0 +1,87 @@
+name: Claude, with a backup account
+description: >
+  Runs anthropics/claude-code-action with one Claude Code OAuth token and, when
+  that account is refused before Claude does anything (a subscription that
+  ended, a token that was revoked), once more with a backup token. A run that
+  failed after Claude started working is never repeated.
+
+inputs:
+  prompt:
+    description: The prompt
+    required: true
+  claude_args:
+    description: Arguments for the Claude CLI (model, turn cap, allowed tools)
+    required: true
+  claude_code_oauth_token:
+    description: Claude Code OAuth token (claude setup-token)
+    required: true
+  claude_code_oauth_token_backup:
+    description: A second account's token, tried when the first is refused (empty = no backup)
+    required: false
+    default: ''
+  github_token:
+    description: The GitHub token Claude gets
+    required: true
+
+outputs:
+  execution_file:
+    description: The execution file of the attempt that counts (the backup's when it ran)
+    value: ${{ steps.backup.outputs.execution_file || steps.first.outputs.execution_file }}
+  account:
+    description: first or backup, the account whose attempt counts
+    value: ${{ steps.refused.outputs.retry == 'true' && 'backup' || 'first' }}
+
+runs:
+  using: composite
+  steps:
+    - name: Claude
+      id: first
+      continue-on-error: true
+      uses: anthropics/claude-code-action@v1
+      with:
+        claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
+        github_token: ${{ inputs.github_token }}
+        claude_args: ${{ inputs.claude_args }}
+        prompt: ${{ inputs.prompt }}
+
+    # Refused means Claude did nothing: no execution file, or a result of one turn at most that cost nothing. Anything
+    # else is a failure of the work itself, which a second account would only repeat
+    - name: Was the account refused?
+      id: refused
+      if: steps.first.outcome == 'failure'
+      shell: bash
+      env:
+        EXEC_FILE: ${{ steps.first.outputs.execution_file }}
+        HAS_BACKUP: ${{ inputs.claude_code_oauth_token_backup != '' }}
+      run: |
+        refused=true
+        said=''
+        if [ -n "${EXEC_FILE:-}" ] && [ -f "$EXEC_FILE" ]; then
+          refused=$(jq -r '[.[] | select(.type == "result")] | all(.[]; (.num_turns // 0) <= 1 and (.total_cost_usd // 0) == 0)' "$EXEC_FILE" 2>/dev/null || echo false)
+          said=$(jq -r '[.[] | select(.type == "result") | .result // ""] | last // "" | .[0:300]' "$EXEC_FILE" 2>/dev/null | tr '\n' ' ' | sed 's/[ .]*$//' || true)
+        fi
+        if [ "$refused" != true ]; then
+          echo "::error::Claude failed after it started working: not tried again with the backup account."
+          exit 1
+        fi
+        if [ "$HAS_BACKUP" != true ]; then
+          echo "::error::The Claude account was refused${said:+ ($said)} and no backup token is set (CLAUDE_CODE_OAUTH_TOKEN_BACKUP)."
+          exit 1
+        fi
+        echo "::warning::The first Claude account was refused${said:+ ($said)}: running on the backup account. Renew CLAUDE_CODE_OAUTH_TOKEN."
+        {
+          echo "> [!WARNING]"
+          echo "> The first Claude account was refused${said:+ ($said)}. This run used the backup account. Renew \`CLAUDE_CODE_OAUTH_TOKEN\`."
+          echo
+        } >> "$GITHUB_STEP_SUMMARY"
+        echo "retry=true" >> "$GITHUB_OUTPUT"
+
+    - name: Claude, on the backup account
+      id: backup
+      if: steps.refused.outputs.retry == 'true'
+      uses: anthropics/claude-code-action@v1
+      with:
+        claude_code_oauth_token: ${{ inputs.claude_code_oauth_token_backup }}
+        github_token: ${{ inputs.github_token }}
+        claude_args: ${{ inputs.claude_args }}
+        prompt: ${{ inputs.prompt }}

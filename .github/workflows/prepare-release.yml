@@ -78,6 +78,9 @@ on:
       CLAUDE_CODE_OAUTH_TOKEN:
         description: Claude Code OAuth token (claude setup-token)
         required: true
+      CLAUDE_CODE_OAUTH_TOKEN_BACKUP:
+        description: A second account's token, tried when the first account is refused before Claude does anything
+        required: false
       RELEASE_BOT_PRIVATE_KEY:
         description: Private key of the release GitHub App (not needed for dry_run)
         required: false
@@ -281,9 +284,10 @@ jobs:
       - name: Draft changelog entry (Claude)
         id: claude
         if: steps.detect.outputs.mode != 'skip'
-        uses: anthropics/claude-code-action@v1
+        uses: artkrsk/wordpress-plugin-workflows/actions/claude@main
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_code_oauth_token_backup: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_BACKUP }}
           # Read-only token: Claude never writes to GitHub, the shell steps below do.
           github_token: ${{ github.token }}
           claude_args: >-
